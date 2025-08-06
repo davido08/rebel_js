@@ -29,6 +29,30 @@ impl fmt::Display for InvalidSyntaxError {
     }
 }
 
+struct PotentialValue {
+    name: Vec<u8>,
+    is_a_function:bool,
+    blocked_values: [bool;58],
+
+}
+
+impl PotentialValue {
+    fn new(name: Vec<u8>, is_a_function: bool, blocked_values_vec: Vec<NewValueName>) -> Self {
+        let mut blocked_values = [false;58];
+        for value in blocked_values_vec {
+            match value {
+                NewValueName::OneChar(x) => blocked_values[(x - 65) as usize],
+                _=>{}
+            }
+        }
+        PotentialValue {
+            name,
+            is_a_function,
+            blocked_values: [false;58],
+        }
+    }
+}
+
 
 enum NewValueName {
     OneChar(u8), 
@@ -60,6 +84,8 @@ enum PreviousLineState {
 #[derive(Clone, PartialEq)]
 enum InsideOf {
     NormalCode,
+
+    //Here the first value wrapped is the new value name of the function, the second one is its list of undeclared yet values.
     Function(NewValueName),
 
     //This is not a real scope but represents the integrity of an if/else if/else statement. 
@@ -128,6 +154,9 @@ struct JsScope {
     semi_column_indexes: Vec<usize>,
     is_a_parent: bool,
     beginning_chars: Vec<u8>,
+    potential_values_called: Vec<PotentialValue>,
+    potential_values_declared: Vec<(NewValueName,Vec<PotentialValue> )>,
+    inside_function: Option<NewValueName>,
     
 }
 impl JsScope {
@@ -151,11 +180,38 @@ impl JsScope {
             semi_column_indexes: Vec::new(), 
             is_a_parent: false,
             beginning_chars: Vec::new(),
-
+            potential_values_called: Vec::new(),
+            inside_function: match inside_of { 
+                InsideOf::Function(x) => Some(x),
+                _=>  
+                 match parent {
+                    Some(p) => p.inside_function,
+                    None=>None
+                }
+            }
 
         }
     }
     pub fn new_value(&mut self, old_value: Vec<u8>, current_index: usize) -> Value {
+
+        //Find if the declared value has been used before in the code (Like in a function that hasn't been called before value declaration)
+        let mut i=0;
+
+        while i < self.potential_values_declared.len() {
+            let potential_value = self.potential_values[i];
+            if potential_value.name == old_value {
+
+             //pass by all blocked values
+
+             while self.latest_available_one_byte != 122 
+             && potential_value.blocked_values[(self.latest_available_one_byte - 65 ) as usize] {
+                self.latest_available_one_byte+=1;
+             }
+
+            }
+            i+=1;
+        }
+        
         let new_name: NewValueName = match self.latest_available_one_byte {
             90 => {
                 self.latest_available_one_byte = 97;
@@ -227,6 +283,7 @@ impl JsScope {
 
         };
         self.values.push(new_value.clone());
+        
         return new_value;
         
     }
@@ -387,22 +444,30 @@ fn const_fn(mut fn_params: &mut FnParams)
 
 fn find_function_name(line_bytes: &Vec<u8>, current_scope: &mut JsScope, i_line: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>){
     let mut function_name: Vec<u8> = Vec::new();
-    loop {
-        i_line+=1;
-        
-        match *line_bytes[i_line] {
-            32 | 40 =>{
-                add_value(&mut current_scope, &mut all_values_count, function_name);
-                break;
+
+    
+    let value = {
+        loop {
+            i_line+=1;
+            
+            match *line_bytes[i_line] {
+                32 | 40 =>{
+                    break; 
+                    
+                }
+                x=> function_name.push(x)
             }
-            x=> function_name.push(x)
         }
-    }
+        add_value(&mut current_scope, &mut all_values_count, function_name)         
+        
+    };
+
     while line_bytes[i_line]!=40{i_line+=1;}
 
     let mut function_param: Vec<u8> = Vec::new();
-    current_scope = JsScope::new(Some(current_scope),   InsideOf::Function);
+    current_scope = JsScope::new(Some(current_scope),   InsideOf::Function(value.value_new_name));
 }
+
 
 fn new_values_init(line_bytes: &Vec<u8>, current_scope: &mut JsScope, i: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>) {
 
@@ -592,52 +657,80 @@ fn find_value(
     let mut idx = *i_line;
     let startindex = idx;
         let mut scope = Rc::new(RefCell::new(current_scope.clone()));
+        let mut j = idx+1;
+
+
+
+        while j< line_bytes.len() {
+            match line_bytes[j] {
+                0..=47 | 58..=64 | 91 | 93 | 94 | 123..=128 => {
+                    break;
+                }
+                _=> {
+                    j+=1;
+                }
+            }
+        }
+
+        let value_name = line_bytes[startindex..j].to_vec();
+
         loop {
             let mut scope_ref = scope.borrow_mut();
-            let mut j=idx+1;
+            
+                for value in scope_ref.values.iter_mut() {
+                    if value.value_old_name == value_name {
 
-            while j < line_bytes.len() {
-                    match line_bytes[j] {
-
-                        0..=47 | 58..=64 | 91 | 93 | 94 | 123..=128 => {
-                            for value in scope_ref.values.iter_mut() {
-                                if value.value_old_name == line_bytes[startindex..j] {
-                                    let mut contained = false;
-                                    for val in &mut current_scope.used_values {
-                                        if val.value_new_name == value.value_new_name {
-                                            val.last_usage_index = idx;
-                                            val.amount_occurences+=1;
-                                            contained=true;
+                        //Put the value in the blocked values of the potential values
+                        for potential_value in &mut current_scope.potential_values_called {
+                            if potential_value.name == value_name {
+                                match value.value_new_name {
+                                    NewValueName::OneChar(byte) => {
+                                        let index = (byte - 65) as usize; // Convert A-Z to 0-25
+                                        if index < 58 {
+                                            potential_value.blocked_values[index] = true;
                                         }
                                     }
-
-
-                                    if !contained {
-                                        current_scope.used_values.push(value.clone());
+                                    NewValueName::TwoChar(_) => {
+                                        // Handle two-char case if needed
+                                        // For now, skip as blocked_values only has 58 slots
                                     }
-                                    value.amount_occurences +=1;
-                                    all_values_count.insert(
-                                        value.value_new_name.clone(),
-                                        *all_values_count.get(&mut value.value_new_name).unwrap() + 1,
-                                    );
-                                    match value.value_new_name {
-                                        NewValueName::OneChar(x)=> {current_scope.characters.push(x);}
-                                        NewValueName::TwoChar(x) => {current_scope.characters.append(&mut x.to_vec());}
-                                    }
-
-                                   current_scope.characters.push(line_bytes[j]);
-                                   *i_line = j-1;
-                                   return;
-
                                 }
                             }
-                            
-                        } _ => {
-                            j+=1;
                         }
+
+
+                        let mut contained = false;
+                        for val in &mut current_scope.used_values {
+                            if val.value_new_name == value.value_new_name {
+                                val.last_usage_index = idx;
+                                val.amount_occurences+=1;
+                                contained=true;
+                            }
+                        }
+
+                        
+                        if !contained {
+                            current_scope.used_values.push(value.clone());
+                            current_scope.children_used_values.push(value.clone());
+                        }
+                        value.amount_occurences +=1;
+                        all_values_count.insert(
+                            value.value_new_name.clone(),
+                            *all_values_count.get(&mut value.value_new_name).unwrap() + 1,
+                        );
+                        match value.value_new_name {
+                            NewValueName::OneChar(x)=> {current_scope.characters.push(x);}
+                            NewValueName::TwoChar(x) => {current_scope.characters.append(&mut x.to_vec());}
+                        }
+
+                        current_scope.characters.push(line_bytes[j]);
+                        *i_line = j-1;
+                        return;
 
                     }
                 }
+                            
+                       
             // Traverse up the parent chain
             let next_scope = match &scope_ref.parent_scope {
                 Some(parent) => Some(parent.clone()),
@@ -646,8 +739,34 @@ fn find_value(
             drop(scope_ref); // End the borrow before reassigning
             scope = next_scope.unwrap();
         }
+        
+
+
+        match value_name {
+            //console | window | document | fetch |
+            [99,111,110,115,111,108,101] | [119,105,110,100,111,119] | [100,111,99,117,109,101,110,116] | [102,101,116,99,104] => {
+                
+            } _ => {
+                if !current_scope.potential_values_called.iter().any(|val| val.name == value_name) {
+                    let is_function = {
+                        let k = j;
+                        while k < line_bytes.len() {
+                            match line_bytes[k] {
+                                32 => k+=1,
+                                40 => true, 
+                                _ => false
+                                
+                            }
+                            false
+                    }
+                    
+                };
+                current_scope.potential_values_called.push(PotentialValue::new(value_name, is_function, current_scope.children_used_values));
+            }
+        }
     
     }
+}
 
 fn find_if_corresponds(line_bytes: &Vec<u8>, i_line: &mut usize, match_next: Vec<u8>, previous_line_state: &mut PreviousLineState) -> bool {
     if *i_line+match_next.len() >= line_bytes.len() {
@@ -926,6 +1045,17 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
         let mut parent_clone = parent.clone();
         drop(parent);
 
+
+        //If the scope is a function, we need to add the potential values declared to the potential values declared.
+        //Else, we need to add the potential values called to the potential values called,
+
+
+        match current_scope.inside_of {
+            InsideOf::Function(x) => parent_clone.potential_values_declared.push((x, current_scope.potential_values_called)),
+            _=> parent_clone.potential_values_called.append(&mut current_scope.potential_values_called),
+        };
+        parent_clone.potential_values_declared.append(&mut current_scope.potential_values_declared);
+
          //If the parent scope is a grouped if/else statement 
          match &mut parent_clone.inside_of {
             InsideOf::UpperIfStatement(scopes,_ ) => {
@@ -939,6 +1069,7 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
     
         
         *current_scope = parent_clone;
+
         current_scope.min_value_declarations += children_min_value_declaration;
         current_scope.all_value_declarations = all_value_declarations;
 
@@ -1134,6 +1265,10 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
     let not_inside_quote_clone = Rc::clone(&not_inside_quote);
 
 
+
+
+
+
     tokio::spawn(async move {
         let mut line_to_send: Vec<u8> = Vec::new();
         
@@ -1156,6 +1291,8 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
     let mut amount_occurence_char_two_byte: HashMap<[u8;2], u16> = HashMap::new();
     let mut amount_occurence_char_three_byte: HashMap<[u8;3], u16> = HashMap::new();
     let mut amount_occurence_char_four_byte: HashMap<[u8;4], u16> = HashMap::new();
+
+    
 
     let mut resuming_list: Vec<u8> = Vec::new();  
 
@@ -1341,7 +1478,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         
                         for i in 61..63{current_scope.characters.push(i)}
                         
-                        let mut potential_values : Vec<u8> = Vec::new();
+                        let mut potential_values_called : Vec<u8> = Vec::new();
                         if *current_scope.characters.last().unwrap() == 41 {current_scope.characters.pop().unwrap();}
                         let mut i = current_scope.characters.len()-1;
                         loop {
@@ -1357,7 +1494,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         current_scope = JsScope::new(Some(current_scope),    InsideOf::AlreadyArrowFunction);
 
                         
-                        let mut i=potential_values.len()-1;
+                        let mut i=potential_values_called.len()-1;
 
                         new_values_init(char_ref, &mut current_scope, &mut i, &mut all_values_count);
 
@@ -1389,9 +1526,12 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     102 if find_if_corresponds(&line_bytes, &mut i_line, vec![117,110,99,116,105,111,110,32], &mut previous_line_state) {
                         
                         find_function_name(&line_bytes, &mut current_scope, &mut i_line, &mut all_values_count);
-                        while buf_bytes[i] != 123 {
-                            i+=1;
+                        while line_bytes[i_line] != 40 {
+                            i_line+=1;
                         }
+                        current_scope.characters.push(40);
+                        
+                        new_values_init(&line_bytes, &mut current_scope, &mut i_line, &mut all_values_count);
                     }
 
 
@@ -1671,7 +1811,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         });
                     }
                     //function
-                    else if byte == 102 && buf_bytes[i+1] == 117 && buf_bytes[i+2] == 111 && buf_bytes[i+3] == 99 && buf_bytes[i+4] == 116 && buf_bytes[i+5] == 105 && buf_bytes[i+6] == 110 && buf_bytes[i+7] == 111 && buf_bytes[i+8] == 32 {
+                    else if byte == 102 && buf_bytes[i+1] == 117 && buf_bytes[i+2] == 111 && buf_bytes[i+3] == 99 && buf_bytes[i+4] == 116 && buf_bytes[i+5] == 105 && buf_bytes[i+6] == 111 && buf_bytes[i+7] == 110 && buf_bytes[i+8] == 32 {
                         i+=8;
                         last_index+=8;
                         let mut end_index=i;
