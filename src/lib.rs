@@ -1,10 +1,29 @@
+/*This project is an open source JavaScript/HTML/CSS compressor
+meant to drastically reduce the size of many websites.
+
+It allows develoopers to write verbose, concise and clear code in developpment,
+and get short and optimized code in production effortlessly and super quickly.
+
+NOTE: This program is still in Beta and is open source, so if you notice any bugs, possible optimizations
+or parts of the code that could be improved, don't hesitate to hit me up on my GitHub: --insert github link--
+
+The logic of the code is moderately complex, but i will try my best to explain through the code and 
+more in depth in the documentation available on the --insert file name-- file.
+
+
+- David Firlotte, 2025
+
+*/
+
+
+
 use core::panic;
 use std::collections::binary_heap::Iter;
 use std::collections::HashMap;
 use std::fmt::Error;
 use std::process::exit;
 use std::thread::current;
-use tokio::fs::File;
+use tokio::{fs::File, io::AsyncReadExt};
 use tokio::sync::mpsc;
 use std::{io::Read, str};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
@@ -13,7 +32,62 @@ use std::cell::RefCell;
 use regex::Regex;
 use std::env::{self, set_current_dir};
 
+/// Newline character
+const NEWLINE: u8 = 10;
+///Space character
+const SPACE: u8 = 32;
+
+///'('
+const LEFT_PARENTHESIS: u8 = 40;
+///')'
+const RIGHT_PARENTHESIS: u8 = 41;
+
+///','
+const COMMA: u8 = 44;
+
+///'{'
+const LEFT_CURLY: u8 = 123;
+///'}'
+const RIGHT_CURLY: u8 = 125;
+
+///'/'
+const SLASH: u8 = 47;
+///'*'
+const ASTERIS: u8 = 42;
+
+///"'"
+const APOSTROPHE: u8 = 39;
+///'""
+const DOUBLE_QUOTE: u8 = 34;
+///'`'
+const GRAVE_ACCENT: u8 = 96;
+
+///':'
+const COLON: u8 = 58;
+///';'
+const SEMICOLON: u8 = 59;
+///'<'
+const LESS_THAN: u8 = 60;
+///'='
+const EQUAL: u8 = 61;
+///'>'
+const MORE_THAN: u8 = 62;
+
+
+///'$'
+const DOLLAR_SIGN: u8 = 36;
+
+
+
+
+
+
 #[derive(Clone, PartialEq, Eq, Hash)]
+
+
+//Establishing constans in order for the code to be more understandable 
+
+
 
 
 //Error declarations 
@@ -26,6 +100,32 @@ impl fmt::Display for InvalidSyntaxError {
         Please make sure that the code served as an input is 100% operational.
         If this seems like a mistake, note that this program is currently under development and we would like to get your feedback as soon as possible.
         You can report bugs or unusual behaviour on our -----INSERT CONTACT PAGE HERE------")
+    }
+}
+
+
+
+struct Buffers<'a> {
+    previous_buffer: [u8;1024],
+    current_buffer: [u8;1024],
+    buffer_ref: &'a [u8;1024],
+    going_to_current:bool,
+    last_index: usize,
+}
+
+impl Buffers {
+    fn check_index(&mut self, i_buffer: &mut usize)-> bool {
+        if *i_buffer == 1024 {
+            if !self.going_to_current {
+                self.going_to_current = true;
+                self.buffer_ref = &self.current_buffer;
+                *i_buffer=0;
+                return true;
+            } else {
+                return false;
+            }
+        }
+        return true;
     }
 }
 
@@ -54,6 +154,7 @@ impl PotentialValue {
 }
 
 
+
 enum NewValueName {
     OneChar(u8), 
     TwoChar([u8;2]),
@@ -80,6 +181,8 @@ enum PreviousLineState {
     WaitingParenthesis,
     WaitingEndScopeChar(u8),
     ExpectingScopeChar,
+    FindingIfCorresponds(Vec<u8>),
+
 }
 #[derive(Clone, PartialEq)]
 enum InsideOf {
@@ -442,15 +545,15 @@ fn const_fn(mut fn_params: &mut FnParams)
 
 }
 
-fn find_function_name(line_bytes: &Vec<u8>, current_scope: &mut JsScope, i_line: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>){
+fn find_function_name(buffers.buffer_ref: &Vec<u8>, current_scope: &mut JsScope, i_buffer: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>){
     let mut function_name: Vec<u8> = Vec::new();
 
     
     let value = {
         loop {
-            i_line+=1;
+            i_buffer+=1;
             
-            match *line_bytes[i_line] {
+            match *buffers.buffer_ref[i_buffer] {
                 32 | 40 =>{
                     break; 
                     
@@ -462,19 +565,19 @@ fn find_function_name(line_bytes: &Vec<u8>, current_scope: &mut JsScope, i_line:
         
     };
 
-    while line_bytes[i_line]!=40{i_line+=1;}
+    while buffers.buffer_ref[i_buffer]!=40{i_buffer+=1;}
 
     let mut function_param: Vec<u8> = Vec::new();
     current_scope = JsScope::new(Some(current_scope),   InsideOf::Function(value.value_new_name));
 }
 
 
-fn new_values_init(line_bytes: &Vec<u8>, current_scope: &mut JsScope, i: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>) {
+fn new_values_init(buffers.buffer_ref: &Vec<u8>, current_scope: &mut JsScope, i: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>) {
 
     let mut param_name: Vec<u8> = Vec::new();
     let mut new_values: Vec<NewValueName>;
     loop {
-        match *line_bytes[i] {
+        match *buffers.buffer_ref[i] {
             32 | 10 => {},
             40 | 61 => {
                 new_values.push(add_value(current_scope,  all_values_count,  std::mem::take(&mut param_name)).value_new_name);
@@ -591,15 +694,15 @@ fn let_fn(mut fn_params: &mut FnParams)
 }
 
 fn find_quote_chars(
-    line_bytes: &Vec<u8>,
     current_scope: &mut JsScope,
-    i_line: &mut usize,
+    i_buffer: &mut usize,
     quote_char: &mut u8, 
     previous_line_state: &mut PreviousLineState,
-    going_through: &mut GoingThrough
+    going_through: &mut GoingThrough,
+    buffers: &mut Buffers,
 ) {
     
-    let byte = line_bytes[*i_line];
+    let byte = buffers.buffer_ref[*i_buffer];
     current_scope.characters.push(byte);
     if byte == *quote_char {
         
@@ -607,32 +710,32 @@ fn find_quote_chars(
        
     } else if *quote_char == 96  {
 
-        if byte == 36 && find_if_corresponds(line_bytes,  i_line, vec![123]) {
-            *i_line+=1;
+        if byte == 36 && find_if_corresponds(buffers.buffer_ref,  i_buffer, vec![123]) {
+            *i_buffer+=1;
             
-            look_for_values_js(line_bytes, current_scope, i_line, true, previous_line_state, going_through );
+            look_for_values_js(buffers.buffer_ref, current_scope, i_buffer, true, previous_line_state, going_through );
         }
 
     } 
 }
 
 fn look_for_values_js( 
-    line_bytes: &Vec<u8>,
     current_scope: &mut JsScope,
-    i_line: &mut usize,
+    i_buffer: &mut usize,
     inside_concat_string: bool,
     previous_line_state: &mut PreviousLineState,
     going_through: &mut GoingThrough,
+    buffers: &mut Buffers
 
 
 ) { 
-    let mut idx =*i_line;
+    let mut idx =*i_buffer;
     let mut quote_char: u8 = 0;
 
-    while idx < line_bytes.len() {
-        let byte = line_bytes[*i_line];
+    while idx < buffers.buffer_ref.len() {
+        let byte = buffers.buffer_ref[*i_buffer];
         if quote_char != 0 {
-            find_quote_chars(line_bytes, current_scope, i_line, &mut quote_char, previous_line_state, going_through);
+            find_quote_chars(buffers.buffer_ref, current_scope, i_buffer, &mut quote_char, previous_line_state, going_through);
         } else {
             match byte {
                 10 => {}
@@ -648,21 +751,21 @@ fn look_for_values_js(
 
 
 fn find_value(
-    line_bytes: &Vec<u8>,
+    buffers: &mut Buffers,
     current_scope: &mut JsScope,
-    i_line: &mut usize,
+    i_buffer: &mut usize,
     all_values_count: &mut HashMap<NewValueName, u16>
 ) {
 
-    let mut idx = *i_line;
+    let mut idx = *i_buffer;
     let startindex = idx;
         let mut scope = Rc::new(RefCell::new(current_scope.clone()));
         let mut j = idx+1;
 
 
 
-        while j< line_bytes.len() {
-            match line_bytes[j] {
+        while j< buffers.buffer_ref.len() {
+            match buffers.buffer_ref[j] {
                 0..=47 | 58..=64 | 91 | 93 | 94 | 123..=128 => {
                     break;
                 }
@@ -672,7 +775,7 @@ fn find_value(
             }
         }
 
-        let value_name = line_bytes[startindex..j].to_vec();
+        let value_name = buffers.buffer_ref[startindex..j].to_vec();
 
         loop {
             let mut scope_ref = scope.borrow_mut();
@@ -723,8 +826,8 @@ fn find_value(
                             NewValueName::TwoChar(x) => {current_scope.characters.append(&mut x.to_vec());}
                         }
 
-                        current_scope.characters.push(line_bytes[j]);
-                        *i_line = j-1;
+                        current_scope.characters.push(buffers.buffer_ref[j]);
+                        *i_buffer = j-1;
                         return;
 
                     }
@@ -750,8 +853,8 @@ fn find_value(
                 if !current_scope.potential_values_called.iter().any(|val| val.name == value_name) {
                     let is_function = {
                         let k = j;
-                        while k < line_bytes.len() {
-                            match line_bytes[k] {
+                        while k < buffers.buffer_ref.len() {
+                            match buffers.buffer_ref[k] {
                                 32 => k+=1,
                                 40 => true, 
                                 _ => false
@@ -768,12 +871,16 @@ fn find_value(
     }
 }
 
-fn find_if_corresponds(line_bytes: &Vec<u8>, i_line: &mut usize, match_next: Vec<u8>, previous_line_state: &mut PreviousLineState) -> bool {
-    if *i_line+match_next.len() >= line_bytes.len() {
+
+
+
+
+fn find_if_corresponds(buffers: &mut Buffers, i_buffer: &mut usize, match_next: Vec<u8>, previous_line_state: &mut PreviousLineState) -> bool {
+    if *i_buffer+match_next.len() >= buffers.buffer_ref.len() {
          return false;
     } 
-    if line_bytes[*i_line+1..*i_line+match_next.len()+1] == match_next {
-            *i_line+=match_next.len();
+    if buffers.buffer_ref[*i_buffer+1..*i_buffer+match_next.len()+1] == match_next {
+            *i_buffer+=match_next.len();
             return true;
     }
     
@@ -781,8 +888,7 @@ fn find_if_corresponds(line_bytes: &Vec<u8>, i_line: &mut usize, match_next: Vec
     
 }
 
-fn check_else_statement(current_scope: &mut JsScope, i_line: &mut usize) {
-    
+fn check_else_statement(current_scope: &mut JsScope, i_buffer: &mut usize) {
     
 }
 
@@ -1257,9 +1363,9 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
 
     let file = File::open(file_input).await?;
 
-    let reader = BufReader::new(file);
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(16);
-    let mut lines = reader.lines();
+
+    let (tx, mut rx) = mpsc::channel::<[u8;1024]>(4);
+
 
     let not_inside_quote= Rc::new(RefCell::new(false));
     let not_inside_quote_clone = Rc::clone(&not_inside_quote);
@@ -1271,17 +1377,13 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
 
     tokio::spawn(async move {
         let mut line_to_send: Vec<u8> = Vec::new();
-        
-        while let Ok(Some(line)) = lines.next_line().await {
-            
-            if line_to_send.len() != 0 {
-                line_to_send.push(10);
+        let mut buffer  = [u8;1024]([0;2024]);
+        loop {
+            let bytes_read = file.read(&mut buffer).await?;
+            if bytes_read == 0 || tx.send(buffer.clone()).await.is_err() {
+                break;
             }
-            line_to_send.append(&mut line.as_bytes().to_vec());
-            
-            if line.len()> 4 && tx.send(std::mem::take(&mut line_to_send)).await.is_err() {
-                break; // receiver dropped
-            }
+
         }
     });
 
@@ -1315,45 +1417,158 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
         
         
     };
+    const length: usize = 1024;
+    let mut i_buffer: usize = 0;
     let mut previous_line_state = PreviousLineState::Code;
 
-    while let Some(line_bytes) = rx.recv().await {
-        let mut i_line = 0;
-       
-        let length = line_bytes.len();
-
-        //If is inside quote char, add newline character 
-        if quote_char!=0 {
-            current_scope.characters.push(10);
+    let mut buffers = {
+        Buffers {
+            previous_buffer: [0;1024],
+            current_buffer: [0;1024],
+            buffer_ref: &[0;1024],
+            going_to_current: true,
+            last_index: 0,
         }
+    };
 
-        while i_line < length {
+    let mut last_char_space = false;
 
+    while let Some(buffer_bytes) = rx.recv().await {
+        buffers.previous_buffer = buffers.current_buffer;
+
+        buffers.current_buffer = buffer_bytes;
+        drop(buffers.buffer_ref);
+        (buffers.buffer_ref, i_buffer) = if buffers.going_to_current {
+            (&buffers.current_buffer, 0)
+        } else {
+            (&buffers.previous_buffer, buffers.last_index)
+        };
+        
+        let mut i_buffer = if buffers.going_to_current {0} else {};
+
+        let mut continuing = true;
+
+        
+        
+        while buffers.check_index(&mut i_buffer){
+
+
+            
            tokio::task::yield_now().await;
             
 
-            let byte = line_bytes[i_line];
+            let byte = buffers.buffer_ref[i_buffer];
             
             if quote_char!=0 {
-               find_quote_chars(&line_bytes, &mut current_scope, &mut i_line, &mut quote_char, &mut previous_line_state, &mut going_through);
+
+                //bad bad bad to change
+               find_quote_chars(&buffers.buffer_ref, &mut current_scope, &mut i_buffer, &mut quote_char, &mut previous_line_state, &mut going_through, last_index);
             }
 
 
             else {
-                    
-                match byte {
-                    //space
 
-                    10=> {}
-                    32=> {
+                //If the last cahracter was a space and the character before it is a letter AND this character is also a letter, add the space.
+                if last_char_space {
+                    match buffers.buffer_ref[i_buffer] {
+                        32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
+                        _ => {
+                            current_scope.characters.push(SPACE);
+                        }
+                    }
+                    last_char_space=false;
+                }
+
+                buffers.last_index = i_buffer;
+                let mut iterated=false;
+
+                loop {
+
+                    match buffers.buffer_ref[i_buffer] {
+                        0..=47 | 58..=64 | 91 | 93 | 94 | 123..=128 => {
+                            //This ensures that if its a single character, it gets included.
+                            if !iterated {
+                                i_buffer+=1;
+                                continuing = buffers.check_index(&mut i_buffer);
+                            
+                            }
+                            break;
+                        }
+                        _=> {
+                            i_buffer+=1;
+                        }
+                        
+
+                    }
+                    iterated=true;
+                    continuing = buffers.check_index(&mut i_buffer);
+                    if !continuing {
+                        break;
+                    }
+                }
+                if !continuing && iterated {
+                    break;
+                }
+
+                //If single character 
+                if i_buffer == buffers.last_index+1 {
+                    let value: u8 = buffers.buffer_ref[buffers.last_index];
+
+                    match value {
+                        NEWLINE=> {}
+
+                        SPACE=> {
+                            match previous_line_state {
+                                 PreviousLineState::ExpectingScopeChar | PreviousLineState::WaitingParenthesis => {},
+                                _ => {
+                                    if i_buffer != 0 {
+                                        match buffers.buffer_ref[i_buffer-1] {
+                                            32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
+                                            _ => {
+                                                last_char_space=true;
+                                            }
+                                        }
+                                    }
+                                    else if buffers.going_to_current {
+                                        match buffers.buffer_ref[1023] {
+                                            32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
+                                            _ => {
+                                                last_char_space=true;
+                                            }
+                                            
+                                        }
+                                    }
+                                }
+                            }
+                            
+                        }
+
+                        APOSTROPHE | DOUBLE_QUOTE | GRAVE_ACCENT => {
+                            current_scope.characters.push(byte);
+                            quote_char = byte;
+                        }
+
+
+                    }
+
+                } else {
+                    let value: Vec<u8> =buffers.buffer_ref[buffers.last_index..i_buffer+1];
+
+                }
+               
+                match byte {
+                    
+                    NEWLINE=> {}
+
+                    SPACE=> {
                         match previous_line_state {
                              PreviousLineState::ExpectingScopeChar | PreviousLineState::WaitingParenthesis => {},
                             _ => {
-                                if i_line != 0 && i_line != length-1 {
-                                    match line_bytes[i_line-1] {
+                                if i_buffer != 0 && i_buffer != length-1 {
+                                    match buffers.buffer_ref[i_buffer-1] {
                                         32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
                                         _ => {
-                                            match line_bytes[i_line+1] {
+                                            match buffers.buffer_ref[i_buffer+1] {
                                             32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {} 
                                             _ =>{
                                                     current_scope.characters.push(32);
@@ -1366,32 +1581,33 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         }
                         
                     }
-                    //Quote char
-                    34 | 39 | 96 => {
+
+                    APOSTROPHE | DOUBLE_QUOTE | GRAVE_ACCENT => {
                         current_scope.characters.push(byte);
                         quote_char = byte;
                     }
+                    
                     //Javascript/CSS Comment
-                    47 => {
-                        if i_line+1>length {
-                            match line_bytes[i_line+1] {
+                    SLASH => {
+                        if i_buffer+1>length {
+                            match buffers.buffer_ref[i_buffer+1] {
                             //Single line comment (like this one)
-                            47 => {
+                            SLASH => {
                                 break;
                             } 
                             /*Possibly multi line comment (like this) */
-                            42 => {
-                                i_line+=1;
+                            ASTERIS => {
+                                i_buffer+=1;
                                 loop {
-                                    i_line+=1;
-                                    if i_line==length {
+                                    i_buffer+=1;
+                                    if i_buffer==length {
                                        previous_line_state = PreviousLineState::JSComment;
                                        break;
                                     }
                                 
-                                    if line_bytes[i_line] == 42  {
-                                        if line_bytes[i_line+1] == 47 {
-                                            i_line+=1;
+                                    if buffers.buffer_ref[i_buffer] == 42  {
+                                        if buffers.buffer_ref[i_buffer+1] == 47 {
+                                            i_buffer+=1;
                                             break;
                                         }
                                     }
@@ -1403,22 +1619,21 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     }
                     //HTML comment (if not inside concatened string)
                     60 => {
-                        if find_if_corresponds(&line_bytes, &mut i_line, vec![33, 45, 45]) {
+                        if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![33, 45, 45]) {
                             loop {
-                                i_line+=1;
-                                if i_line==length {
+                                i_buffer+=1;
+                                if i_buffer==length {
                                     previous_line_state = PreviousLineState::HTMLComment;
                                     break;
                                 }
-                                if line_bytes[i_line] == 45 && find_if_corresponds(&line_bytes, &mut i_line, vec![45, 62]) {
+                                if buffers.buffer_ref[i_buffer] == 45 && find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![45, 62]) {
                                     break;
 
                                 }
                             }
                         }
                     }
-                    //}
-                    125 => {
+                    RIGHT_CURLY=> {
 
                         while current_scope.end_scope_char == EndOfScopeChar::SemiColon {
                             scope_end(&mut current_scope, &mut all_values_count).await;
@@ -1462,8 +1677,8 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         }
 
                     }
-                    //{
-                    123 => {
+                    
+                    LEFT_CURLY => {
                         if previous_line_state != PreviousLineState::ExpectingScopeChar {
                             current_scope = JsScope::new(Some(current_scope),   InsideOf::NormalCode);
                         } else {
@@ -1474,7 +1689,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     }
 
                     //=>
-                    61 if find_if_corresponds(&line_bytes, &mut i_line, vec![62]) => {
+                    EQUAL if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![62]) => {
                         
                         for i in 61..63{current_scope.characters.push(i)}
                         
@@ -1487,8 +1702,6 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                                 _ => i-=1
                             }
                         }
-
-                        let 
                         
                         let char_ref = &current_scope.characters;
                         current_scope = JsScope::new(Some(current_scope),    InsideOf::AlreadyArrowFunction);
@@ -1499,14 +1712,14 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         new_values_init(char_ref, &mut current_scope, &mut i, &mut all_values_count);
 
                         
-                        i_line+=1;
+                        i_buffer+=1;
 
                         previous_line_state = PreviousLineState::ExpectingScopeChar;
                         
                        
                     }
                     //if
-                    105 if find_if_corresponds(&line_bytes, &mut i_line, vec![102], &mut previous_line_state) => {
+                    105 if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![102], &mut previous_line_state) => {
                         for inside in [InsideOf::UpperIfStatement(Vec::new(), false), InsideOf::IfStatement] {
                             current_scope = JsScope::new(Some(current_scope), inside);
                         }
@@ -1514,8 +1727,8 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         previous_line_state = PreviousLineState::WaitingParenthesis;
                     }
                     //else
-                    101 if match current_scope.inside_of{InsideOf::UpperIfStatement(_,_ )=>true,_=>false} && find_if_corresponds(&line_bytes, &mut i_line, vec![108, 115, 101], &mut previous_line_state) => {
-                        let new_inside_of = if find_if_corresponds(&line_bytes, &mut i_line, vec![32,105,102], &mut previous_line_state) {
+                    101 if match current_scope.inside_of{InsideOf::UpperIfStatement(_,_ )=>true,_=>false} && find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![108, 115, 101], &mut previous_line_state) => {
+                        let new_inside_of = if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![32,105,102], &mut previous_line_state) {
                             InsideOf::IfElseStatement 
                         } else {
                             InsideOf::ElseStatement
@@ -1523,15 +1736,15 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         current_scope = JsScope::new(Some(current_scope),  new_inside_of);
                     }
                     //function
-                    102 if find_if_corresponds(&line_bytes, &mut i_line, vec![117,110,99,116,105,111,110,32], &mut previous_line_state) {
+                    102 if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![117,110,99,116,105,111,110,32], &mut previous_line_state) {
                         
-                        find_function_name(&line_bytes, &mut current_scope, &mut i_line, &mut all_values_count);
-                        while line_bytes[i_line] != 40 {
-                            i_line+=1;
+                        find_function_name(&buffers.buffer_ref, &mut current_scope, &mut i_buffer, &mut all_values_count);
+                        while buffers.buffer_ref[i_buffer] != 40 {
+                            i_buffer+=1;
                         }
                         current_scope.characters.push(40);
                         
-                        new_values_init(&line_bytes, &mut current_scope, &mut i_line, &mut all_values_count);
+                        new_values_init(&buffers.buffer_ref, &mut current_scope, &mut i_buffer, &mut all_values_count);
                     }
 
 
@@ -1605,7 +1818,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     }
                 }
             }
-            i_line+=1;
+            i_buffer+=1;
          
         }
         
@@ -1927,3 +2140,28 @@ mod tests {
         
     }
 }
+
+
+//TODO
+//Add something that gets all the used values from a function when its called.
+
+/*Current issue, lets consider this code:
+
+    let value1 = 5;
+
+    function myFunc() {
+        console.log(value1);
+    }
+
+    let value2 = 2;
+
+    myFunc();
+
+
+With the current code's logic, value2 could have the same one char value name as value1, but because we then call
+a function using value1, its gonna be replaced by value2 which is not what we want.
+
+We need a data structure to track all of the used values of functions that could potentially be called
+in order to update the "last_usage_index" property of each value used inside the function each time the function gets called.
+
+*/
