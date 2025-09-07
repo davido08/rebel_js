@@ -16,6 +16,8 @@ more in depth in the documentation available on the --insert file name-- file.
 */
 
 mod characters;
+mod compression;
+mod code_analysis;
 use core::panic;
 use std::collections::binary_heap::Iter;
 use std::collections::HashMap;
@@ -31,17 +33,11 @@ use std::cell::RefCell;
 use regex::Regex;
 use std::env::{self, set_current_dir};
 
-
-
+use crate::code_analysis::{GoingThrough, PreviousBufferState};
 
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-
-
 //Establishing constans in order for the code to be more understandable 
-
-
-
 
 //Error declarations 
 
@@ -56,356 +52,11 @@ impl fmt::Display for InvalidSyntaxError {
     }
 }
 
-struct CharacterAmounts{
-    one_byte_chars: [u32;127],
-    two_byte_chars: [Vec<(u8, u16)>;255],
-    three_byte_chars: [Vec<([u8;2], u16)>;255],
-    four_byte_chars: [Vec<([u8;3], u16)>;255]
-}
-
-
-struct BitSet64 {
-    bitset: u64,
-    offset: u8,
-}
-
-impl BitSet64 {
-    fn insert(&mut self, position: u8) {
-        self.bitset = self.bitset | (1 << (position - self.offset))
-    }
-    fn remove(&mut self, position: u8) {
-        self.bitset = self.bitset & !(1 << (position - self.offset));
-    }
-    fn get(&self, position: u8) -> bool {
-        return 1 & (self.bitset >> (position - self.offset)) == 1;
-    }
-}
-
-
-struct Buffers<'a> {
-    previous_buffer: [u8;1024],
-    current_buffer: [u8;1024],
-    buffer_ref: &'a [u8;1024],
-    going_to_current:bool,
-    last_index: usize,
-}
-
-impl<'a> Buffers<'a> {
-    fn check_index(&mut self, i_buffer: &mut usize)-> bool {
-        if *i_buffer == 1024 {
-            if !self.going_to_current {
-                self.going_to_current = true;
-                self.buffer_ref = &self.current_buffer;
-                *i_buffer=0;
-            } 
-            self.going_to_current = !self.going_to_current;
-            return self.going_to_current;
-        }
-        return true;
-    }
-}
-
-struct PotentialValue {
-    name: Vec<u8>,
-    is_a_function:bool,
-    blocked_values: [bool;58],
-
-}
-
-impl PotentialValue {
-    fn new(name: Vec<u8>, is_a_function: bool, blocked_values_vec: Vec<NewValueName>) -> Self {
-        let mut blocked_values = [false;58];
-        for value in blocked_values_vec {
-            match value {
-                NewValueName::OneChar(x) => blocked_values[(x - 65) as usize],
-                _=>{}
-            }
-        }
-        PotentialValue {
-            name,
-            is_a_function,
-            blocked_values: [false;58],
-        }
-    }
-}
-
-
-
-enum NewValueName {
-    OneChar(u8), 
-    TwoChar([u8;2]),
-}
-
-#[derive(Clone, PartialEq)]
-enum EndOfScopeChar {
-    Curly,
-    Parenthesis,
-    SemiColon,
-    None,
-}
-
-enum MatchType {
-    Done(bool),
-    ToContinue(Vec<u8>),
-}
-#[derive(PartialEq)]
-enum PreviousLineState {
-    Code, 
-    JSComment,
-    HTMLComment, 
-    StringConcat([u8;2]),
-    WaitingParenthesis,
-    WaitingEndScopeChar(u8),
-    ExpectingScopeChar,
-    FindingIfCorresponds(Vec<u8>),
-
-}
-#[derive(Clone, PartialEq)]
-enum InsideOf {
-    NormalCode,
-
-    //Here the first value wrapped is the new value name of the function, the second one is its list of undeclared yet values.
-    Function(NewValueName),
-
-    //This is not a real scope but represents the integrity of an if/else if/else statement. 
-    //The vector of JsScopes will contain all of the "children" scopes (one for if, other one for else if and last one for else)
-
-    //The boolean will turn true if one of the child scopes is obligated to have curlies as end scope character,
-    // which means that all of the child scopes will have curlies as the end of scope character.
-    UpperIfStatement(Vec<JsScope>, bool),
-    IfStatement,
-    IfElseStatement,
-    ElseStatement,
-    ForLoop,
-    Undefined,
-}
-enum GoingThrough {
-    HTML,
-    CSS, 
-    JS
-}
-struct FnParams<'a> {
-    i: &'a mut usize,
-    end_index: &'a mut usize,
-    buf_bytes: &'a mut Vec<u8>,
-    value_name: &'a mut Vec<u8>,
-    all_values_count: &'a mut HashMap<NewValueName, u16>,
-    last_index: &'a mut usize,
-    current_scope: &'a mut JsScope,
-
-}
-impl<'a> FnParams<'a> {
-    fn return_indexes(&mut self, indexes:[usize; 3])  
-    {
-        [*self.end_index, *self.i, *self.last_index] = indexes;
-    }
-}
-
-struct DuoValueFunc {
-    func: [fn (&mut FnParams); 2],
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct Value {
-    value_old_name: Vec<u8>,
-    value_new_name: NewValueName,
-    amount_occurences: u16,
-    declaration_index: usize,
-    last_usage_index: usize,
-    function_index: Option<usize>,
-
-}
-
-
-#[derive(Clone, PartialEq)]
-struct JsScope {
-    values: Vec<Value>,
-    used_values: Vec<Value>,
-    parent_scope: Option<Rc<RefCell<JsScope>>>,
-    starting_index: usize,
-    latest_available_one_byte: u8,
-    children_used_values: Vec<Value>,
-    characters: Vec<u8>,
-    inside_of: InsideOf,
-    end_scope_char: EndOfScopeChar,
-    min_value_declarations: u16,
-    all_value_declarations: u16,
-    semi_column_indexes: Vec<usize>,
-    is_a_parent: bool,
-    beginning_chars: Vec<u8>,
-    potential_values_called: Vec<PotentialValue>,
-    potential_values_declared: Vec<(NewValueName,Vec<PotentialValue> )>,
-    inside_function: Option<NewValueName>,
-    
-}
-impl JsScope {
-    pub fn new(parent: Option<JsScope>, inside_of: InsideOf) -> Self {
-        let (one_byte, current_index): (u8, usize) = 
-        if let Some(scope) = &parent {
-            (scope.latest_available_one_byte, scope.starting_index+scope.characters.len())
-        } else {(65, 0)};
-        JsScope {
-            values: Vec::new(),
-            used_values: Vec::new(),
-            parent_scope: parent.map(|s| Rc::new(RefCell::new(s))),
-            starting_index: current_index,
-            latest_available_one_byte: one_byte,
-            children_used_values: Vec::new(),
-            characters: Vec::new(),
-            inside_of: inside_of,
-            end_scope_char: EndOfScopeChar::None,
-            min_value_declarations: 0,
-            all_value_declarations: 0,
-            semi_column_indexes: Vec::new(), 
-            is_a_parent: false,
-            beginning_chars: Vec::new(),
-            potential_values_called: Vec::new(),
-            inside_function: match inside_of { 
-                InsideOf::Function(x) => Some(x),
-                _=>  
-                 match parent {
-                    Some(p) => p.inside_function,
-                    None=>None
-                }
-            }
-
-        }
-    }
-    pub fn new_value(&mut self, old_value: Vec<u8>, current_index: usize) -> Value {
-
-        //Find if the declared value has been used before in the code (Like in a function that hasn't been called before value declaration)
-        let mut i=0;
-
-        while i < self.potential_values_declared.len() {
-            let potential_value = self.potential_values[i];
-            if potential_value.name == old_value {
-
-             //pass by all blocked values
-
-             while self.latest_available_one_byte != 122 
-             && potential_value.blocked_values[(self.latest_available_one_byte - 65 ) as usize] {
-                self.latest_available_one_byte+=1;
-             }
-
-            }
-            i+=1;
-        }
-        
-        let new_name: NewValueName = match self.latest_available_one_byte {
-            90 => {
-                self.latest_available_one_byte = 97;
-                NewValueName::OneChar(97)
-               
-            } 
-            122 => {
-                let mut two_byte: [u8;2] = [65,65];
-                
-                loop {
-                    let mut value_there = false;
-                     for value in &self.values {
-                            if let NewValueName::TwoChar(val_two) = &value.value_new_name {
-                                if *val_two == two_byte  {
-                                    value_there = true;
-                                    match two_byte[1] {
-                                        90 => {
-                                            two_byte[1] = 97;
-                                        } 
-                                        122 => {
-                                            match two_byte[0] {
-                                                90 => {
-                                                    two_byte[0] = 97;
-                                                    two_byte[1] +=1;
-                                                }
-                                                122 => {
-                                                    panic!("Either my code doesnt behave like its supposed to, or there is actually over 2500 values in the same scope which is beyond insane");
-                                                } 
-                                                _ => {
-                                                    two_byte[0] += 1;
-                                                    two_byte[1] = 65;
-                                                }
-                                            }
-                                            
-                                        } 
-                                        _ => {
-                                            two_byte[1]+=1;
-                                        }
-                                    }
-                                } 
-                            }
-                    }
-                    if !value_there {
-                        break;
-                    }
-                }
-                NewValueName::TwoChar(two_byte)
-
-               
-            } _ => {
-                self.latest_available_one_byte+=1;
-                NewValueName::OneChar(self.latest_available_one_byte)
-
-            }
-
-        };
-
-       let new_value = Value {
-            value_old_name: old_value,
-            value_new_name : new_name,
-            amount_occurences: 0,
-            declaration_index: current_index,
-            last_usage_index: current_index,
-            function_index: if self.is_function {
-                Some(self.starting_index)
-            } else {
-                None
-            },
-
-        };
-        self.values.push(new_value.clone());
-        
-        return new_value;
-        
-    }
-
-    pub fn add_char(value: u8, )
-
-}
-
-const MATCHES: [&str; 22] = [
-    "function ",
-    "let ",
-    "const ",
-    "var ",
-    "else if",
-    "async ",
-    "await ",
-    "return ",
-    "else ",
-    "yield ",
-    "instanceof ",
-    "typeof ",
-    "void ",
-    "delete ",
-    " in ",
-    " of ",
-    "new ",
-    "throw ",
-    "case ",
-    " class=",
-    " id=",
-    " onclick="
-
-];
-
-fn find_match() {
-    
-}
-
 fn value_name_is_valid(a: u8, b: u8) -> bool {
     match a {
-        0..=47 | 59..=64 | 91..=96 | 123..=127 => {
+        0..=47 | 59..=64 | 91..=96 | characters::LEFT_CURLY..=127 => {
             match b {
-                0..=47 | 59..=64 | 91..=96 | 123..=127 => {
+                0..=47 | 59..=64 | 91..=96 | characters::LEFT_CURLY..=127 => {
                     true
                 }
                 _ => {
@@ -419,25 +70,25 @@ fn value_name_is_valid(a: u8, b: u8) -> bool {
     }
 }
 
-fn find_value_to_replace(q_char: &mut u8, j: &mut usize, changed_values: &HashMap<[u8;2], u8>, current_scope: &mut JsScope) {
+fn find_value_to_replace(code_analysis_object: &mut code_analysis::CodeAnalysisObject, q_char: &mut u8, j: &mut usize, changed_values: &HashMap<[u8;2], u8>) {
     let mut jdx = *j;
     let mut q_char_dx= *q_char;
     match q_char_dx {
         39 | 34 => {
-            if current_scope.characters[jdx] == q_char_dx {
+            if code_analysis_object.current_scope.characters[jdx] == q_char_dx {
                 q_char_dx=0;
             }
         }
         96 => {
-            match current_scope.characters[jdx] {
+            match code_analysis_object.current_scope.characters[jdx] {
                 96=> {
                     q_char_dx=0;
                 }
-                36 if current_scope.characters[jdx+1] == 123=> {
+                36 if code_analysis_object.current_scope.characters[jdx+1] == characters::LEFT_CURLY=> {
                         jdx+=2;
-                        while current_scope.characters[jdx] != 125 {
+                        while code_analysis_object.current_scope.characters[jdx] != characters::RIGHT_CURLY {
                             let mut new_q_char: u8 = 0;
-                            find_value_to_replace(&mut new_q_char, &mut jdx,  changed_values, current_scope);
+                            find_value_to_replace(&mut new_q_char, &mut jdx,  changed_values, code_analysis_object.current_scope);
                             jdx+=1;
                         }
                         jdx+=1;
@@ -448,12 +99,12 @@ fn find_value_to_replace(q_char: &mut u8, j: &mut usize, changed_values: &HashMa
         } 
         _ => {
             for (old_val, new_val) in changed_values {
-                if current_scope.characters[jdx] == old_val[0] && 
-                   current_scope.characters[jdx+1] == old_val[1] &&
-                   value_name_is_valid(current_scope.characters[jdx-1], current_scope.characters[jdx+2]) 
+                if code_analysis_object.current_scope.characters[jdx] == old_val[0] && 
+                   code_analysis_object.current_scope.characters[jdx+1] == old_val[1] &&
+                   value_name_is_valid(code_analysis_object.current_scope.characters[jdx-1], code_analysis_object.current_scope.characters[jdx+2]) 
                 {
-                    current_scope.characters.remove(jdx+1);
-                    current_scope.characters[jdx] = *new_val;
+                    code_analysis_object.current_scope.characters.remove(jdx+1);
+                    code_analysis_object.current_scope.characters[jdx] = *new_val;
 
                 }
             
@@ -468,252 +119,43 @@ fn find_value_to_replace(q_char: &mut u8, j: &mut usize, changed_values: &HashMa
 }
 
 
-fn chose_function(last_index: &mut usize,
-        i: &mut usize,
-        increment: usize,
-        wanted_function:
-        DuoValueFunc,
-        current_function: 
-        &mut DuoValueFunc
-)-> bool
-{
-    *i+=increment;
-    *last_index+=increment;
-    *current_function = wanted_function;
-    return true;
-}
-
-
-fn const_fn(mut fn_params: &mut FnParams) 
-{
-    let mut e_i = *fn_params.end_index;
-    let mut idx = *fn_params.i;
-    let mut l_i = *fn_params.last_index;
-    loop {
-        e_i+=1;
-        match fn_params.buf_bytes[e_i] {
-            61 | 32   => {
-                let value = fn_params.current_scope.new_value( fn_params.value_name.clone(), idx);
-                idx+=1;
-    
-                match value.value_new_name {
-                    NewValueName::OneChar(val) => {
-                        e_i-=1;
-                        fn_params.buf_bytes[idx] = val 
-                    }
-                    NewValueName::TwoChar(val) => {
-                        e_i-=2;
-                        (fn_params.buf_bytes[e_i], fn_params.buf_bytes[e_i+1]) = (val[0], val[1]);
-                    }
-                }
-                fn_params.buf_bytes.drain(idx..e_i);
-                
-                fn_params.all_values_count.insert(value.value_new_name.clone(), 1);
-                fn_params.current_scope.used_values.push(value.clone());
-                break;
-            } 
-            _ => {
-                fn_params.value_name.push(fn_params.buf_bytes[idx]);
-    
-            }
-        }
-
-    }
-    fn_params.return_indexes([e_i, idx, l_i]);
-
-}
-
-fn find_function_name(buffers: &Buffers, current_scope: &mut JsScope, i_buffer: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>){
-    let mut function_name: Vec<u8> = Vec::new();
-
-    
-    let value = {
-        loop {
-            i_buffer+=1;
-            
-            match *buffers.buffer_ref[i_buffer] {
-                32 | 40 =>{
-                    break; 
-                    
-                }
-                x=> function_name.push(x)
-            }
-        }
-        add_value(&mut current_scope, &mut all_values_count, function_name)         
-        
-    };
-
-    while buffers.buffer_ref[i_buffer]!=40{i_buffer+=1;}
-
-    let mut function_param: Vec<u8> = Vec::new();
-    current_scope = JsScope::new(Some(current_scope),   InsideOf::Function(value.value_new_name));
-}
-
-
-fn new_values_init(buffers: &Buffers, current_scope: &mut JsScope, i: &mut usize, all_values_count: &mut HashMap<NewValueName, u16>) {
-
-    let mut param_name: Vec<u8> = Vec::new();
-    let mut new_values: Vec<NewValueName>;
-    loop {
-        match *buffers.buffer_ref[i] {
-            32 | 10 => {},
-            40 | 61 => {
-                new_values.push(add_value(current_scope,  all_values_count,  std::mem::take(&mut param_name)).value_new_name);
-                break;
-            }
-            44 => new_values.push(add_value(current_scope,  all_values_count,  std::mem::take(&mut param_name)).value_new_name),
-            x=>param_name.push(x),
-        }
-        *i+=1;
-    }
-   
-    if new_values.len()>1 {
-        current_scope.characters.push(40);
-        for value_name in new_values {
-            match value_name {
-                NewValueName::OneChar(x) =>current_scope.characters.push(x),
-                NewValueName::TwoChar(x) => {
-                    for char in x {
-                        current_scope.characters.push(char)
-                    }
-                }
-            }
-            current_scope.characters.push(44);
-        }
-        *current_scope.characters.last_mut().unwrap() = 41;
-    }
-    else {
-        match new_values[0] {
-            NewValueName::OneChar(x) => current_scope.characters.push(x),
-            NewValueName::TwoChar(x) => {
-                for char in x {
-                    current_scope.characters.push(char);
-                }
-            }
-        }
-        
-    }
-
-}
-
-fn let_fn(mut fn_params: &mut FnParams) 
-{
-    let mut idx = *fn_params.i;
-    let mut l_i = *fn_params.last_index;
-
-    let mut length_new_values=0;
-    
-    let mut values_list: Vec<Value> = Vec::new();
-    loop {
-        idx+=1;
-        let char = fn_params.buf_bytes[idx];
-        match char {
-            32 => {}
-            61 | 44 => {
-                
-                let value = fn_params.current_scope.new_value( std::mem::take(fn_params.value_name), idx);
-                
-                fn_params.all_values_count.insert(value.value_new_name.clone(), 1);
-                fn_params.current_scope.used_values.push(value.clone());
-                if char != 44 {
-                    let mut index= idx-length_new_values;
-                    match value.value_new_name {
-                        NewValueName::OneChar(x) => {
-                            fn_params.buf_bytes[index-1] = x;
-                            index-=1;
-                        }
-                        NewValueName::TwoChar(x) => {
-                            [fn_params.buf_bytes[l_i], fn_params.buf_bytes[index+1]] = x;
-                            index-=2;
-                        }
-                    }
-                    fn_params.buf_bytes.drain(l_i..index);
-
-                    loop {
-                        l_i+=1;
-                        fn_params.buf_bytes[l_i] = 44;
-                        l_i+=1;
-
-                        match values_list.pop() {
-                            Some(val)=> {
-                                match val.value_new_name {
-                                    NewValueName::OneChar(x) => {fn_params.buf_bytes[l_i] = x}
-                                    NewValueName::TwoChar(x) => {
-                                        [fn_params.buf_bytes[l_i], fn_params.buf_bytes[l_i+1]] = x;
-                                        l_i+=1;
-                                        
-                                    }
-                                }
-                            }
-                            None=>{break;}
-                        }
-                    }
-                    break;
-                }
-               
-                length_new_values += match value.value_new_name {
-                    NewValueName::OneChar(_) => {2}
-                    NewValueName::TwoChar(_) => {3}
-                };
-                 values_list.push(value);
-                
-                
-            } 
-
-            _ => {
-                
-                fn_params.value_name.push(fn_params.buf_bytes[idx]);
-            }
-        }
-
-    }
-    fn_params.return_indexes([idx, idx, idx-1]);
-
-}
 
 fn find_quote_chars(
-    current_scope: &mut JsScope,
-    i_buffer: &mut usize,
     quote_char: &mut u8, 
-    previous_line_state: &mut PreviousLineState,
-    going_through: &mut GoingThrough,
-    buffers: &mut Buffers,
+    going_through: &mut code_analysis::GoingThrough,
+    code_analysis_object: &mut code_analysis::CodeAnalysisObject,
 ) {
     
-    let byte = buffers.buffer_ref[*i_buffer];
-    current_scope.characters.push(byte);
+    let byte = code_analysis_object.buffer_ref[*code_analysis_object.i_buffer];
+    code_analysis_object.add_one_byte_char(byte);
     if byte == *quote_char {
-        
         *quote_char = 0;
        
     } else if *quote_char == 96  {
 
-        if byte == 36 && find_if_corresponds(buffers.buffer_ref,  i_buffer, vec![123]) {
-            *i_buffer+=1;
+        if byte == 36 && find_if_corresponds(code_analysis_object.buffer_ref,  code_analysis_object.i_buffer, vec![characters::LEFT_CURLY]) {
+            *code_analysis_object.i_buffer+=1;
             
-            look_for_values_js(buffers.buffer_ref, current_scope, i_buffer, true, previous_line_state, going_through );
+            look_for_values_js( true,  going_through, code_analysis_object );
         }
 
     } 
 }
 
 fn look_for_values_js( 
-    current_scope: &mut JsScope,
-    i_buffer: &mut usize,
     inside_concat_string: bool,
-    previous_line_state: &mut PreviousLineState,
-    going_through: &mut GoingThrough,
-    buffers: &mut Buffers
+    going_through: &mut code_analysis::GoingThrough,
+    code_analysis_object: &mut code_analysis::CodeAnalysisObject,
 
 
 ) { 
-    let mut idx =*i_buffer;
+    let mut idx =*code_analysis_object.i_buffer;
     let mut quote_char: u8 = 0;
 
-    while idx < buffers.buffer_ref.len() {
-        let byte = buffers.buffer_ref[*i_buffer];
+    while idx < code_analysis_object.buffer_ref.len() {
+        let byte = code_analysis_object.buffer_ref[*code_analysis_object.i_buffer];
         if quote_char != 0 {
-            find_quote_chars(buffers.buffer_ref, current_scope, i_buffer, &mut quote_char, previous_line_state, going_through);
+            find_quote_chars(code_analysis_object.buffer_ref, code_analysis_object.current_scope, code_analysis_object.i_buffer, &mut quote_char, code_analysis_object.previous_buffer_state, going_through);
         } else {
             match byte {
                 10 => {}
@@ -729,22 +171,20 @@ fn look_for_values_js(
 
 
 fn find_value(
-    buffers: &mut Buffers,
-    current_scope: &mut JsScope,
-    i_buffer: &mut usize,
-    all_values_count: &mut HashMap<NewValueName, u16>
+    code_analysis_object: &mut code_analysis::CodeAnalysisObject,
+    all_values_count: &mut HashMap<code_analysis::NewValueName, u16>
 ) {
 
-    let mut idx = *i_buffer;
+    let mut idx = *code_analysis_object.i_buffer;
     let startindex = idx;
-        let mut scope = Rc::new(RefCell::new(current_scope.clone()));
+        let mut scope = Rc::new(RefCell::new(code_analysis_object.current_scope.clone()));
         let mut j = idx+1;
 
 
 
-        while j< buffers.buffer_ref.len() {
-            match buffers.buffer_ref[j] {
-                0..=47 | 58..=64 | 91 | 93 | 94 | 123..=128 => {
+        while j< code_analysis_object.buffer_ref.len() {
+            match code_analysis_object.buffer_ref[j] {
+                0..=47 | 58..=64 | 91 | 93 | 94 | characters::LEFT_CURLY..=128 => {
                     break;
                 }
                 _=> {
@@ -753,7 +193,7 @@ fn find_value(
             }
         }
 
-        let value_name = buffers.buffer_ref[startindex..j].to_vec();
+        let value_name = code_analysis_object.buffer_ref[startindex..j].to_vec();
 
         loop {
             let mut scope_ref = scope.borrow_mut();
@@ -762,16 +202,16 @@ fn find_value(
                     if value.value_old_name == value_name {
 
                         //Put the value in the blocked values of the potential values
-                        for potential_value in &mut current_scope.potential_values_called {
+                        for potential_value in &mut code_analysis_object.current_scope.potential_values_called {
                             if potential_value.name == value_name {
                                 match value.value_new_name {
-                                    NewValueName::OneChar(byte) => {
+                                    code_analysis::NewValueName::OneChar(byte) => {
                                         let index = (byte - 65) as usize; // Convert A-Z to 0-25
                                         if index < 58 {
                                             potential_value.blocked_values[index] = true;
                                         }
                                     }
-                                    NewValueName::TwoChar(_) => {
+                                    code_analysis::NewValueName::TwoChar(_) => {
                                         // Handle two-char case if needed
                                         // For now, skip as blocked_values only has 58 slots
                                     }
@@ -781,7 +221,7 @@ fn find_value(
 
 
                         let mut contained = false;
-                        for val in &mut current_scope.used_values {
+                        for val in &mut code_analysis_object.current_scope.used_values {
                             if val.value_new_name == value.value_new_name {
                                 val.last_usage_index = idx;
                                 val.amount_occurences+=1;
@@ -791,8 +231,8 @@ fn find_value(
 
                         
                         if !contained {
-                            current_scope.used_values.push(value.clone());
-                            current_scope.children_used_values.push(value.clone());
+                            code_analysis_object.current_scope.used_values.push(value.clone());
+                            code_analysis_object.current_scope.children_used_values.push(value.clone());
                         }
                         value.amount_occurences +=1;
                         all_values_count.insert(
@@ -800,12 +240,12 @@ fn find_value(
                             *all_values_count.get(&mut value.value_new_name).unwrap() + 1,
                         );
                         match value.value_new_name {
-                            NewValueName::OneChar(x)=> {current_scope.characters.push(x);}
-                            NewValueName::TwoChar(x) => {current_scope.characters.append(&mut x.to_vec());}
+                            code_analysis::NewValueName::OneChar(x)=> {code_analysis_object.add_one_byte_char(x);}
+                            code_analysis::NewValueName::TwoChar(x) => {code_analysis_object.current_scope.characters.append(&mut x.to_vec());}
                         }
 
-                        current_scope.characters.push(buffers.buffer_ref[j]);
-                        *i_buffer = j-1;
+                        code_analysis_object.add_one_byte_char(code_analysis_object.buffer_ref[j]);
+                        *code_analysis_object.i_buffer = j-1;
                         return;
 
                     }
@@ -828,11 +268,11 @@ fn find_value(
             [99,111,110,115,111,108,101] | [119,105,110,100,111,119] | [100,111,99,117,109,101,110,116] | [102,101,116,99,104] => {
                 
             } _ => {
-                if !current_scope.potential_values_called.iter().any(|val| val.name == value_name) {
+                if !code_analysis_object.current_scope.potential_values_called.iter().any(|val| val.name == value_name) {
                     let is_function = {
                         let k = j;
-                        while k < buffers.buffer_ref.len() {
-                            match buffers.buffer_ref[k] {
+                        while k < code_analysis_object.buffer_ref.len() {
+                            match code_analysis_object.buffer_ref[k] {
                                 32 => k+=1,
                                 40 => true, 
                                 _ => false
@@ -842,7 +282,7 @@ fn find_value(
                     }
                     
                 };
-                current_scope.potential_values_called.push(PotentialValue::new(value_name, is_function, current_scope.children_used_values));
+                code_analysis_object.current_scope.potential_values_called.push(PotentialValue::new(value_name, is_function, code_analysis_object.current_scope.children_used_values));
             }
         }
     
@@ -850,129 +290,145 @@ fn find_value(
 }
 
 
-
-
-
-fn find_if_corresponds(buffers: &mut Buffers, i_buffer: &mut usize, match_next: Vec<u8>, previous_line_state: &mut PreviousLineState) -> bool {
-    if *i_buffer+match_next.len() >= buffers.buffer_ref.len() {
-         return false;
-    } 
-    if buffers.buffer_ref[*i_buffer+1..*i_buffer+match_next.len()+1] == match_next {
-            *i_buffer+=match_next.len();
-            return true;
-    }
+fn assign_end_scope_char(code_analysis_object: &mut code_analysis::CodeAnalysisObject, previous_buffer_state: &mut code_analysis::PreviousBufferState, end_scope_char: code_analysis::EndOfScopeChar) {
     
-    return false;
-    
+    code_analysis_object.current_scope.beginning_chars = std::mem::take(&mut code_analysis_object.current_scope.characters); 
+    code_analysis_object.current_scope.end_scope_char = end_scope_char;
+    *code_analysis_object.previous_buffer_state = code_analysis::PreviousBufferState::Code;
 }
 
-fn check_else_statement(current_scope: &mut JsScope, i_buffer: &mut usize) {
-    
-}
+fn scope_end(code_analysis_object: &mut code_analysis::CodeAnalysisObject, all_values_count: &mut HashMap<code_analysis::NewValueName, u16>, previous_buffer_state: &mut code_analysis::PreviousBufferState)-> io::Result<()> {
 
-fn assign_end_scope_char(current_scope: &mut JsScope, previous_line_state: &mut PreviousLineState, end_scope_char: EndOfScopeChar) {
-    
-    current_scope.beginning_chars = std::mem::take(&mut current_scope.characters); 
-    current_scope.end_scope_char = end_scope_char;
-    *previous_line_state = PreviousLineState::Code;
-}
-
-async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<NewValueName, u16>, previous_line_state: &mut PreviousLineState)-> io::Result<()> {
-
-    current_scope.characters.push(125);
-    if let Some(scope) = current_scope.parent_scope.clone() {
-        let all_children_used_values = current_scope.children_used_values.clone();
-        let mut unused_values: HashMap<u8, Option<usize>> = HashMap::new();
-
-        for val in all_values_count.keys().cloned() {
-            if let NewValueName::OneChar(one_char) = val {
-                
-                let mut unused=true;
-                for value in &current_scope.values {
-                    if value.value_new_name == val {
-                        unused=false;
-                        break;
-                    }
-                }
-
-                if unused {
-                    let mut present_after: bool = false;
-                    for child_value in current_scope.children_used_values.clone() {
-                        if child_value.value_new_name == val {
-                            unused_values.insert(one_char, Some(child_value.last_usage_index));
-                            present_after=true;
-                            break;
-                        }
-                    }
-                    if !present_after {
-                        unused_values.insert(one_char, None);
-                    }
-                    
-                }
-            }
-            
-        }
+    code_analysis_object.add_one_byte_char(characters::RIGHT_CURLY);
+    if let Some(scope) = code_analysis_object.current_scope.parent_scope.clone() {
         let mut changed_values: HashMap<[u8;2], u8> = HashMap::new();
         
-        for value in &mut current_scope.values {
-            if let NewValueName::TwoChar(two_char) =value.value_new_name {
+        for value in &mut code_analysis_object.current_scope.two_byte_name_values {
+            if let code_analysis::NewValueName::TwoChar(two_char) =value.value_new_name {
             let mut changed_value : Option<u8> = None;
-            
-            for (new_val, index) in &unused_values {
+            //List of changed values with their old two byte name and their new one byte name
+            let changed_values: Vec<([u8;2], u8)> = Vec::new();
+
+            for index in 0..52 {
                 /*If the last time the value was called is before the assignment
                  of the value we want to replace, then we can go ahead and replace it
                  without affecting the functionnality of the code. */
-                if match index {
-                   Some(i)=>{*i<value.declaration_index }
-                   None=>{true}
-                }{
-                    changed_values.insert(two_char, *new_val);
-                    changed_value = Some(*new_val);
-                    value.value_new_name = NewValueName::OneChar(*new_val);
-                    break;
+                 if let Some(last_usage) = code_analysis_object.current_scope.children_used_values.new_value_last_position[index] {
+                    if last_usage < value.declaration_index {
+
+                        let byte = match index {
+                            0..=25 => index + 65,
+                            26..=51 => index + 71,
+                        } as u8;
+
+                        changed_values.push((two_char, byte))
+                    }
                 }
                     
                 }
-                if let Some(v) = changed_value {
-                    unused_values.remove(&v);
+            }
+        }
+
+        
+        //Creating a new vector which we will add the parent scope characters we are going back to.
+        let new_characters: Vec<u8> = Vec::with_capacity(code_analysis_object.current_scope.characters.len() - changed_values.len()*2);
+
+        //Adding a quote char so this way we don't accidentally replace something inside quotes
+        let mut quote_char: u8 = 0;
+        //Concatenation will increase by 1 if either 
+        let mut concatenation: u8 = 0;
+
+        let mut j: usize = 0;
+
+        let mut next_valid=true;
+
+        let len =  code_analysis_object.current_scope.characters.len();
+
+        while j < len {
+            let mut byte = code_analysis_object.current_scope.characters[j];
+            if quote_char != 0 {
+                if byte == quote_char {
+                    quote_char = 0;
                 }
             }
-            tokio::task::yield_now().await;
+            //If is inside a quoted sentence with a grave accent
+            else if concatenation & 1 == 1 {
+                if byte == characters::GRAVE_ACCENT {
+                    concatenation-=1;
+                }
+            }
+            else {
+                match byte {
+                    characters::APOSTROPHE | characters::DOUBLE_QUOTE => {
+                        quote_char=byte;
+                    }
+
+                    //If the character is a grave accent OR if the character is a dollar sign followed by a left curly inside a grave accent quoted sentence, increase concatenation by 1.
+                    characters::GRAVE_ACCENT | characters::DOLLAR_SIGN  
+                    if j < len - 1 &&
+                    concatenation & 1 == 1 &&
+                    code_analysis_object.current_scope.characters[j+1] == characters::LEFT_CURLY => {
+                        concatenation+=1;
+                        
+                    }
+                    //Not a letter nor a number
+                    32..=47 | 58..= 63 | 91..=96 | 123..=127 => {
+                        next_valid=true;
+                    }
+                    _ => {
+                        for (old_n, new_n) in changed_values {
+                            //If the sequence corresponds to the old value and is between other non letter/number characters, replace it with the new name.
+                            if next_valid &&
+                            byte == old_n[0] &&
+                            j < len - 1 &&
+                            code_analysis_object.current_scope.characters[j+1] == old_n[1] && 
+                            (j<len-2 || match code_analysis_object.current_scope.characters[j+2] {
+                                32..=47 | 58..= 63 | 91..=96 | 123..=127 => true, _ => false
+                            })
+                            {
+                                byte=new_n;
+                                for char in old_n {
+                                     code_analysis_object.character_amounts.remove_small_char(char);
+                                }
+
+                                j+=1;
+
+                            }
+                        }
+                        next_valid=false;
+                    }
+                }
+            }
+
+
+            new_characters.push(byte);
+            code_analysis_object.character_amounts.add_small_char(byte);
+            j+=1;
         }
 
-        let mut j = current_scope.starting_index;
-        let mut q_char: u8 = 0;
-        
-        let len = 2;
-        while j >= len {
 
-            find_value_to_replace(&mut q_char, &mut j, &changed_values, current_scope);
-            tokio::task::yield_now().await;
-        }
+        let mut children_min_value_declaration = code_analysis_object.current_scope.min_value_declarations;
 
-
-        let mut children_min_value_declaration = current_scope.min_value_declarations;
-
-        if current_scope.inside_of == InsideOf::ForLoop {
+        if code_analysis_object.current_scope.inside_of == code_analysis::InsideOf::ForLoop {
             children_min_value_declaration +=1;
         }
 
-        let all_value_declarations = current_scope.all_value_declarations+current_scope.values.len() as u16;
+        let all_value_declarations = code_analysis_object.current_scope.all_value_declarations+code_analysis_object.current_scope.values.len() as u16;
 
 
-        match current_scope.end_scope_char {
-            EndOfScopeChar::Curly=>chars.push(123),
-            EndOfScopeChar::Parenthesis=>chars.push(41),
+        match code_analysis_object.current_scope.end_scope_char {
+            code_analysis::EndOfScopeChar::Curly=>code_analysis_object.current_scope.characters.push(characters::RIGHT_CURLY),
+            code_analysis::EndOfScopeChar::Parenthesis=>code_analysis_object.current_scope.characters.push(characters::RIGHT_PARENTHESIS),
             _=>{}
         }
         //Re-ordering big if/else statements
 
-        match current_scope.inside_of {
-            InsideOf::UpperIfStatement(list_scopes,_ )=> {
+        match code_analysis_object.current_scope.inside_of {
+            code_analysis::InsideOf::UpperIfStatement(list_scopes,_ )=> {
                 let mut curlies = false;
                 //Usde to determine if the whole statement has to be used with curlies and "if" and "else" keywords.
                 for scope in list_scopes {
-                    if scope.end_scope_char == EndOfScopeChar::Curly {
+                    if scope.end_scope_char == code_analysis::EndOfScopeChar::Curly {
                         curlies=true;
                         break;
                     }
@@ -983,33 +439,33 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
                    if curlies {
                         match scope.inside_of {
                             //Add the "if" keyowrd to the chars 
-                            InsideOf::IfStatement=>current_scope.characters.append(&mut vec![105,102]),
+                            code_analysis::InsideOf::IfStatement=>code_analysis_object.current_scope.characters.append(&mut b"if".to_vec()),
                             //Add the "else if" keyword to the chars
-                            InsideOf::IfElseStatement=>current_scope.characters.append(&mut vec![101,108,115,101,32,105,102]),
+                            code_analysis::InsideOf::IfElseStatement=>code_analysis_object.current_scope.characters.append(&mut b"else if".to_vec()),
                             //Add the "else" keyword to the chars
-                            InsideOf::ElseStatement=>current_scope.characters.append(&mut vec![101,108,115,101]),
-                            //Supposed to be impossible to have another InsideOf type
+                            code_analysis::InsideOf::ElseStatement=>code_analysis_object.current_scope.characters.append(&mut b"else".to_vec()),
+                            //Supposed to be impossible to have another code_analysis::InsideOf type
                             _=>panic!("Wtf"),
                         }
                         
 
                         //Add (
-                        current_scope.characters.push(40);
+                        code_analysis_object.add_one_byte_char(characters::LEFT_PARENTHESIS);
 
                         //Add the condition 
-                        current_scope.characters.append(&mut scope.beginning_chars);
+                        code_analysis_object.current_scope.characters.append(&mut scope.beginning_chars);
 
                         //Add )
-                        current_scope.characters.push(41);
+                        code_analysis_object.add_one_byte_char(characters::RIGHT_PARENTHESIS);
 
                         //Add {
-                        current_scope.characters.push(123);
+                        code_analysis_object.add_one_byte_char(characters::LEFT_CURLY);
 
                         //Add the contents of the scope
-                        current_scope.characters.append(&mut scope.characters);
+                        code_analysis_object.code_analysis_object.current_scope.characters.append(&mut scope.characters);
 
                         //Add }
-                        current_scope.characters.push(125);
+                        code_analysis_object.add_one_byte_char(characters::RIGHT_CURLY);
 
                    }
                    //If the scope doesn't have to be in curlies, therefore we can use shortcuts in the syntax.
@@ -1033,18 +489,18 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
                         let mut result =true;
                         for char in scope.characters {
                             match char {
-                                40 | 91 => {
+                                characters::LEFT_PARENTHESIS | characters::LEFT_SQAURE_BRACKET => {
 
                                     insides+=1;
                                 }
-                                41 | 93 => {
+                                characters::RIGHT_PARENTHESIS | characters::RIGHT_SQAURE_BRACKET => {
 
                                     if insides==0 {
                                         return Err(InvalidSyntaxError);
                                     }
                                     insides-=1;
                                 }
-                                44 => {
+                                characters::COMMA => {
 
                                     if insides==0 {
                                         result=false;
@@ -1061,29 +517,29 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
                  if multiple {
                     match scope.inside_of {
 
-                        InsideOf::IfStatement=> {
+                        code_analysis::InsideOf::IfStatement=> {
                             //Condition
-                            current_scope.characters.append(&mut scope.beginning_chars);
+                            code_analysis_object.current_scope.characters.append(&mut scope.beginning_chars);
 
                             //"?" character (shortcut for "if" after the condition)
-                            current_scope.characters.push(63);
+                            code_analysis_object.add_one_byte_char(63);
                         }
-                        InsideOf::IfElseStatement => {
+                        code_analysis::InsideOf::IfElseStatement => {
                             //":" standing for "else"
-                            current_scope.characters.append(58);
+                            code_analysis_object.current_scope.characters.append(58);
 
                             //Then putting another if statement
 
                             //Condition
-                            current_scope.characters.append(&mut scope.beginning_chars);
+                            code_analysis_object.current_scope.characters.append(&mut scope.beginning_chars);
 
                             //"?" character (shortcut for "if" after the condition)
-                            current_scope.characters.push(63);
+                            code_analysis_object.add_one_byte_char(63);
 
                             
                         } 
-                        InsideOf::ElseStatement => {
-                            current_scope.characters.push(58);
+                        code_analysis::InsideOf::ElseStatement => {
+                            code_analysis_object.add_one_byte_char(58);
                         }
 
                     }
@@ -1100,19 +556,19 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
                         scope.characters[index]=44;
                     }
                     //Add condition
-                    current_scope.characters.append(&mut scope.beginning_chars);
+                    code_analysis_object.current_scope.characters.append(&mut scope.beginning_chars);
 
                     //Add "&&"
-                    current_scope.characters.push(38);
-                    current_scope.characters.push(38);
+                    code_analysis_object.add_one_byte_char(38);
+                    code_analysis_object.add_one_byte_char(38);
 
                     //Add code 
 
 
                    }
-                   if multiple_statements{current_scope.characters.push(40);}
-                    current_scope.characters.append(&mut scope.characters);
-                    if multiple_statements{current_scope.characters.push(41);}
+                   if multiple_statements{code_analysis_object.add_one_byte_char(40);}
+                    code_analysis_object.current_scope.characters.append(&mut scope.characters);
+                    if multiple_statements{code_analysis_object.add_one_byte_char(characters::RIGHT_PARENTHESIS);}
                    
                    
                 }
@@ -1134,47 +590,39 @@ async fn scope_end(current_scope: &mut JsScope, all_values_count: &mut HashMap<N
         //Else, we need to add the potential values called to the potential values called,
 
 
-        match current_scope.inside_of {
-            InsideOf::Function(x) => parent_clone.potential_values_declared.push((x, current_scope.potential_values_called)),
-            _=> parent_clone.potential_values_called.append(&mut current_scope.potential_values_called),
+        match code_analysis_object.current_scope.inside_of {
+            code_analysis::InsideOf::Function(x) => parent_clone.potential_values_declared.push((x, code_analysis_object.current_scope.potential_values_called)),
+            _=> parent_clone.potential_values_called.append(&mut code_analysis_object.current_scope.potential_values_called),
         };
-        parent_clone.potential_values_declared.append(&mut current_scope.potential_values_declared);
+        parent_clone.potential_values_declared.append(&mut code_analysis_object.current_scope.potential_values_declared);
 
          //If the parent scope is a grouped if/else statement 
          match &mut parent_clone.inside_of {
-            InsideOf::UpperIfStatement(scopes,_ ) => {
-                scopes.push(current_scope.clone());
+            code_analysis::InsideOf::UpperIfStatement(scopes,_ ) => {
+                scopes.push(code_analysis_object.current_scope.clone());
             }
             _=> {
-                parent_clone.characters.append(&mut current_scope.beginning_chars);
-                parent_clone.characters.append(&mut current_scope.characters);
+                parent_clone.characters.append(&mut code_analysis_object.current_scope.beginning_chars);
+                parent_clone.characters.append(&mut code_analysis_object.current_scope.characters);
             }
          }
     
         
-        *current_scope = parent_clone;
+        *code_analysis_object.current_scope = parent_clone;
 
-        current_scope.min_value_declarations += children_min_value_declaration;
-        current_scope.all_value_declarations = all_value_declarations;
+        code_analysis_object.current_scope.min_value_declarations += children_min_value_declaration;
+        code_analysis_object.current_scope.all_value_declarations = all_value_declarations;
 
-        current_scope.is_a_parent = true;
+        code_analysis_object.current_scope.is_a_parent = true;
 
 
-        current_scope.children_used_values = all_children_used_values;
+        code_analysis_object.current_scope.children_used_values = all_children_used_values;
             
      }
      Ok(())
 
 }
 
-
-fn add_value(current_scope: &mut JsScope, all_values_count: &mut HashMap<NewValueName, u16>, function_param: Vec<u8>) -> Value {
-    let value = current_scope.new_value(function_param, current_scope.starting_index+current_scope.characters.len());
-    all_values_count.insert(value.value_new_name.clone(), 1);
-    current_scope.used_values.push(value.clone());
-    
-    return value;
-}
 
 fn drain_values(buf_bytes: &mut Vec<u8>, i: &mut usize, last_index: &mut usize) {
     if *last_index+1 != *i {
@@ -1326,17 +774,10 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
     let mut i = 0;
     let mut last_index = 0;
     let mut index_difference = 0;
-
-    let mut current_scope = JsScope::new(None,  false, InsideOf::NormalCode);
     
-
     let mut inside_for = false;
 
-    let mut current_function = DuoValueFunc{func: [const_fn, const_fn]};
-
-    
-
-    let mut all_values_count: HashMap<NewValueName, u16> = HashMap::new();
+    let mut all_values_count: HashMap<code_analysis::NewValueName, u16> = HashMap::new();
 
     let file = File::open(file_input).await?;
 
@@ -1347,14 +788,9 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
     let not_inside_quote= Rc::new(RefCell::new(false));
     let not_inside_quote_clone = Rc::clone(&not_inside_quote);
 
-
-
-
-
-
     tokio::spawn(async move {
         let mut line_to_send: Vec<u8> = Vec::new();
-        let mut buffer  = [u8;1024]([0;2024]);
+        let mut buffer  :[u8;1024]= [0;1024];
         loop {
             let bytes_read = file.read(&mut buffer).await?;
             if bytes_read == 0 || tx.send(buffer.clone()).await.is_err() {
@@ -1364,29 +800,19 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
         }
     });
 
-
-
-    let mut amount_occurence_char_one_byte: [u32;128]= [0;128];
-    let mut amount_occurence_char_two_byte: HashMap<[u8;2], u16> = HashMap::new();
-    let mut amount_occurence_char_three_byte: HashMap<[u8;3], u16> = HashMap::new();
-    let mut amount_occurence_char_four_byte: HashMap<[u8;4], u16> = HashMap::new();
-
-    
-
     let mut resuming_list: Vec<u8> = Vec::new();  
 
-    
-    let mut going_through: GoingThrough = GoingThrough::HTML;
+    let mut going_through = code_analysis::GoingThrough::HTML;
     let was_originally_html = {
         if file_input.ends_with(".html") {
             true
         } 
         else if file_input.ends_with(".css") {
-            going_through = GoingThrough::CSS;
+            going_through = code_analysis::GoingThrough::CSS;
             false
         }
         else if file_input.ends_with(".js") {
-            going_through = GoingThrough::JS;
+            going_through =code_analysis::GoingThrough::JS;
             false
         } else {
             false
@@ -1395,72 +821,82 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
         
     };
     const length: usize = 1024;
-    let mut i_buffer: usize = 0;
-    let mut previous_line_state = PreviousLineState::Code;
 
-    let mut buffers = {
-        Buffers {
+    let mut code_analysis_object = {
+        code_analysis::CodeAnalysisObject {
             previous_buffer: [0;1024],
             current_buffer: [0;1024],
             buffer_ref: &[0;1024],
             going_to_current: true,
             last_index: 0,
+            i_buffer: 0,
+            last_char: 0,
+            current_scope: code_analysis::JsScope::new(None,   code_analysis::InsideOf::NormalCode),
+            character_amounts: compression::CharacterAmounts { 
+                one_byte_chars: [0;127],
+                two_byte_chars: std::array::from_fn(|_| Vec::with_capacity(4)),
+                three_byte_chars: std::array::from_fn(|_| Vec::with_capacity(4)),
+                four_byte_chars: std::array::from_fn(|_| Vec::new()) 
+            },
+            current_big_char: [0;4],
+            current_char_bytes_remaining: 0, 
+            previous_buffer_state: code_analysis::PreviousBufferState::Code,
+
         }
     };
-    let mut last_char: u8 = 0;
 
     while let Some(buffer_bytes) = rx.recv().await {
-        buffers.previous_buffer = buffers.current_buffer;
 
-        buffers.current_buffer = buffer_bytes;
-        drop(buffers.buffer_ref);
-        (buffers.buffer_ref, i_buffer) = if buffers.going_to_current {
-            (&buffers.current_buffer, 0)
+       
+        code_analysis_object.previous_buffer = code_analysis_object.current_buffer;
+
+        code_analysis_object.current_buffer = buffer_bytes;
+        drop(code_analysis_object.buffer_ref);
+        (code_analysis_object.buffer_ref, code_analysis_object.i_buffer) = if code_analysis_object.going_to_current {
+            (&code_analysis_object.current_buffer, 0)
         } else {
-            (&buffers.previous_buffer, buffers.last_index)
+            (&code_analysis_object.previous_buffer, code_analysis_object.last_index)
         };
         
-        let mut i_buffer = if buffers.going_to_current {0} else {};
+        code_analysis_object.i_buffer = if code_analysis_object.going_to_current {0} else {};
 
         let mut continuing = true;
 
+        match code_analysis_object.previous_buffer_state {
+
+            code_analysis::PreviousBufferState::WaitingIfStatementFirstI => code_analysis_object.verify_if_else_statement(false),
+
+            code_analysis::PreviousBufferState::WaitingIfStatementFà => code_analysis_object.verify_if_else_statement(true),
+
+        }
         
-        
-        while buffers.check_index(&mut i_buffer){
-
-
-            
-           tokio::task::yield_now().await;
+        while code_analysis_object.check_index(){
             
 
-            let byte = buffers.buffer_ref[i_buffer];
+            let byte = code_analysis_object.get_char();
             
             if quote_char!=0 {
 
                 //bad bad bad to change
-               find_quote_chars(&buffers.buffer_ref, &mut current_scope, &mut i_buffer, &mut quote_char, &mut previous_line_state, &mut going_through, last_index);
+               find_quote_chars(&code_analysis_object.buffer_ref, &mut code_analysis_object.current_scope, &mut code_analysis_object.i_buffer, &mut quote_char, &mut code_analysis_object.previous_buffer_state, &mut going_through, last_index);
             }
 
-
             else {
-
-                
-
-                match last_char {
+                match code_analysis_object.last_char {
 
                     //If the last character was a space and the character before it is a letter AND this character is also a letter, add the space.
                     characters::SPACE => {
-                        match buffers.buffer_ref[i_buffer] {
+                        match byte {
                             
-                            32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
+                            32 | 34..=47 | 58..=63 | 91 | 93 | characters::LEFT_CURLY..=characters::RIGHT_CURLY => {}
                             _ => {
-                                current_scope.characters.push(characters::SPACE);
+                                code_analysis_object.add_one_byte_char(characters::SPACE);
                             }
                         }
 
                     }
                     characters::EQUAL => {
-                        match buffers.buffer_ref[i_buffer] {
+                        match byte {
                             characters::MORE_THAN => {
                                 //=>
                             }
@@ -1471,37 +907,26 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         }
                         
                     }
-
-                    
-
-
                 }
-                last_char=0;
+                code_analysis_object.last_char=0;
                 
 
-                buffers.last_index = i_buffer;
+                code_analysis_object.last_index = code_analysis_object.i_buffer;
                 let mut iterated=false;
 
                 loop {
 
-                    match buffers.buffer_ref[i_buffer] {
-                        0..=47 | 58..=64 | 91 | 93 | 94 | 123..=128 => {
+                    match code_analysis_object.get_char() {
+                        0..=47 | 58..=64 | 91 | 93 | 94 | characters::LEFT_CURLY..=128 => {
                             //This ensures that if its a single character, it gets included.
-                            if !iterated {
-                                i_buffer+=1;
-                                continuing = buffers.check_index(&mut i_buffer);
-                            
-                            }
                             break;
                         }
                         _=> {
-                            i_buffer+=1;
+                            code_analysis_object.i_buffer+=1;
                         }
-                        
-
                     }
                     iterated=true;
-                    continuing = buffers.check_index(&mut i_buffer);
+                    continuing = code_analysis_object.check_index();
                     if !continuing {
                         break;
                     }
@@ -1511,65 +936,103 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                 }
 
                 //If single character 
-                if i_buffer == buffers.last_index+1 {
-                    let value: u8 = buffers.buffer_ref[buffers.last_index];
+                if code_analysis_object.i_buffer < code_analysis_object.last_index+2 {
+                    let value: u8 = code_analysis_object.buffer_ref[code_analysis_object.last_index];
 
                     match value {
                         //If the value is a number, simply add it. No more processing needed.
-                        48..58=> {current_scope.characters.push(value)}
+                        48..57=> {code_analysis_object.add_one_byte_char(value)}
 
                         characters::NEWLINE => {}
 
                         characters::SPACE => {
-                            match previous_line_state {
-                                 PreviousLineState::ExpectingScopeChar | PreviousLineState::WaitingParenthesis => {},
+                            match code_analysis_object.previous_buffer_state {
+                                 code_analysis::PreviousBufferState::ExpectingScopeChar | code_analysis::PreviousBufferState::WaitingParenthesis => {},
                                 _ => {
-                                    match if i_buffer !=0 {buffers.buffer_ref[i_buffer-1]} 
-                                          else if buffers.going_to_current {buffers.previous_buffer[1023]}
+                                    match if code_analysis_object.i_buffer !=0 {code_analysis_object.buffer_ref[code_analysis_object.i_buffer-1]} 
+                                          else if code_analysis_object.going_to_current {code_analysis_object.previous_buffer[1023]}
                                           else {32} {
-                                          32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
+                                          32 | 34..=47 | 58..=63 | 91 | 93 | characters::LEFT_CURLY..=characters::RIGHT_CURLY => {}
                                           _ => {
-                                            last_char = characters::SPACE;
+                                            code_analysis_object.last_char = characters::SPACE;
                                           }
 
                                     }
                                 }
                             }
-                            
                         }
                         
-
                         characters::APOSTROPHE | characters::DOUBLE_QUOTE | characters::GRAVE_ACCENT => {
-                            current_scope.characters.push(byte);
+                            code_analysis_object.add_one_byte_char(byte);
                             quote_char = byte;
                         }
 
+                        characters::SLASH => {
+                            //If its a double slash, then it's a single line JS Comment and we want to not add the characters inside of it.
+                            if code_analysis_object.last_char == characters::SLASH {
+                                //Keep iterating without adding the character to the vector until we hit newline
+                                code_analysis_object.go_through_js_inline_comment();
+                            }
+                            else {
+                                code_analysis_object.last_char=characters::SLASH;
+                            }
+                            
+                        }
+                        characters::ASTERIS => {
+                            //If the asteris is preceeded by a slash, its a multi line JS Comment.
+                            if code_analysis_object.last_char == characters::SLASH {
+                                code_analysis_object.go_through_js_comment();
+                            }
 
+                        }
+                        
                     }
+                    
                 //If multiple characters 
 
                 } else {
-                    let value: Vec<u8> =buffers.buffer_ref[buffers.last_index..i_buffer+1];
+                    let value: Vec<u8> =code_analysis_object.buffer_ref[code_analysis_object.last_index..code_analysis_object.i_buffer+1];
+
+                    match value {
+                        b"if" => {
+                            for inside in [code_analysis::InsideOf::UpperIfStatement(Vec::new(), false), code_analysis::InsideOf::IfStatement] {
+                                code_analysis_object.current_scope = code_analysis::JsScope::new(Some(code_analysis_object.current_scope), inside);
+                            }
+                            code_analysis_object.previous_buffer_state = code_analysis::PreviousBufferState::WaitingParenthesis;
+
+                        }
+                        b"else" => code_analysis_object.verify_if_else_statement(false),
+
+                        b"function" => {
+                        code_analysis_object.find_function_name();
+                        while code_analysis_object.buffer_ref[code_analysis_object.i_buffer] != 40 {
+                            code_analysis_object.i_buffer+=1;
+                        }
+                        code_analysis_object.add_one_byte_char(40);
+
+                        code_analysis_object.new_values_init();
+                            
+                        }
+                        b""
+                        
+                    }
                 }
                
                 match byte {
-
-                    
-                    
                     characters::NEWLINE=> {}
 
                     characters::SPACE=> {
-                        match previous_line_state {
-                             PreviousLineState::ExpectingScopeChar | PreviousLineState::WaitingParenthesis => {},
+                        match code_analysis_object.previous_buffer_state {
+                             code_analysis::PreviousBufferState::ExpectingScopeChar | code_analysis::PreviousBufferState::WaitingParenthesis => {},
                             _ => {
-                                if i_buffer != 0 && i_buffer != length-1 {
-                                    match buffers.buffer_ref[i_buffer-1] {
-                                        32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {}
+                                if code_analysis_object.i_buffer != 0 && code_analysis_object.i_buffer != length-1 {
+                                    match code_analysis_object.buffer_ref[code_analysis_object.i_buffer-1] {
+                                        32 | 34..=47 | 58..=63 | 91 | 93 | characters::LEFT_CURLY..=characters::RIGHT_CURLY => {}
                                         _ => {
-                                            match buffers.buffer_ref[i_buffer+1] {
-                                            32 | 34..=47 | 58..=63 | 91 | 93 | 123..=125 => {} 
+                                            match code_analysis_object.buffer_ref[code_analysis_object.i_buffer+1] {
+                                            32 | 34..=47 | 58..=63 | 91 | 93 | characters::LEFT_CURLY..=characters::RIGHT_CURLY => {} 
                                             _ =>{
-                                                    current_scope.characters.push(32);
+                                                    code_analysis_object.add_one_byte_char(32);
                                                 }
                                             }
                                         }
@@ -1581,50 +1044,22 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     }
 
                     characters::APOSTROPHE | characters::DOUBLE_QUOTE | characters::GRAVE_ACCENT => {
-                        current_scope.characters.push(byte);
+                        code_analysis_object.add_one_byte_char(byte);
                         quote_char = byte;
                     }
                     
                     //Javascript/CSS Comment
-                    characters::SLASH => {
-                        if i_buffer+1>length {
-                            match buffers.buffer_ref[i_buffer+1] {
-                            //Single line comment (like this one)
-                            characters::SLASH => {
-                                break;
-                            } 
-                            /*Possibly multi line comment (like this) */
-                            characters::ASTERIS => {
-                                i_buffer+=1;
-                                loop {
-                                    i_buffer+=1;
-                                    if i_buffer==length {
-                                       previous_line_state = PreviousLineState::JSComment;
-                                       break;
-                                    }
-                                
-                                    if buffers.buffer_ref[i_buffer] == characters::ASTERIS  {
-                                        if buffers.buffer_ref[i_buffer+1] == characters::SLASH {
-                                            i_buffer+=1;
-                                            break;
-                                        }
-                                    }
-                                }
-                            } _ => current_scope.characters.push(characters::ASTERIS)
-                        }
-                        }
-                        
-                    }
+                    
                     //HTML comment (if not inside concatened string)
                     60 => {
-                        if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![33, 45, 45]) {
+                        if find_if_corresponds(&code_analysis_object.buffer_ref, &mut code_analysis_object.i_buffer, vec![33, 45, 45]) {
                             loop {
-                                i_buffer+=1;
-                                if i_buffer==length {
-                                    previous_line_state = PreviousLineState::HTMLComment;
+                                code_analysis_object.i_buffer+=1;
+                                if code_analysis_object.i_buffer==length {
+                                    code_analysis_object.previous_buffer_state = code_analysis::PreviousBufferState::HTMLComment;
                                     break;
                                 }
-                                if buffers.buffer_ref[i_buffer] == 45 && find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![45, 62]) {
+                                if code_analysis_object.buffer_ref[code_analysis_object.i_buffer] == 45 && find_if_corresponds(&code_analysis_object.buffer_ref, &mut code_analysis_object.i_buffer, vec![45, 62]) {
                                     break;
 
                                 }
@@ -1633,43 +1068,43 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     }
                     characters::RIGHT_CURLY=> {
 
-                        while current_scope.end_scope_char == EndOfScopeChar::SemiColon {
-                            scope_end(&mut current_scope, &mut all_values_count).await;
+                        while code_analysis_object.current_scope.end_scope_char == code_analysis::EndOfScopeChar::SemiColon {
+                            scope_end(&mut code_analysis_object.current_scope, &mut all_values_count).await;
                         }
 
-                        if current_scope.end_scope_char == EndOfScopeChar::Curly {
+                        if code_analysis_object.current_scope.end_scope_char == code_analysis::EndOfScopeChar::Curly {
                             
                             //ANALYSIS 9.1 (See doc for more info)
                             /*Analyze if we can replace curly brackets in a scope */
 
-                            let changing_to_semi_column = current_scope.values.len() as u16 == current_scope.min_value_declarations && (!current_scope.is_a_parent || current_scope.semi_column_indexes.len() == {if last_char_semi_column {0} else {1}});
+                            let changing_to_semi_column = code_analysis_object.current_scope.values.len() as u16 == code_analysis_object.current_scope.min_value_declarations && (!code_analysis_object.current_scope.is_a_parent || code_analysis_object.current_scope.semi_column_indexes.len() == {if code_analysis_object.last_char_semi_column {0} else {1}});
                             if changing_to_semi_column {
-                                current_scope.end_scope_char = EndOfScopeChar::SemiColon;
+                                code_analysis_object.current_scope.end_scope_char = code_analysis::EndOfScopeChar::SemiColon;
 
-                                if *current_scope.characters.last().unwrap() == 59 { current_scope.semi_column_indexes.pop(); } else { current_scope.characters.push(59); }
+                                if *code_analysis_object.current_scope.characters.last().unwrap() == 59 { code_analysis_object.current_scope.semi_column_indexes.pop(); } else { code_analysis_object.add_one_byte_char(59); }
 
                                 //As long as the scope isn't inside an if/else statement, change all the semicolons by commas
-                                match current_scope.inside_of {
-                                    InsideOf::ElseStatement | InsideOf::IfElseStatement | InsideOf::IfStatement =>{},
+                                match code_analysis_object.current_scope.inside_of {
+                                    code_analysis::InsideOf::ElseStatement | code_analysis::InsideOf::IfElseStatement | code_analysis::InsideOf::IfStatement =>{},
 
                                     _ => {
-                                        for index in current_scope.semi_column_indexes {
+                                        for index in code_analysis_object.current_scope.semi_column_indexes {
 
                                             //TEST (Remove at production)
-                                            if current_scope.characters[index] != 59 {
+                                            if code_analysis_object.current_scope.characters[index] != 59 {
                                                 panic!("INDEX OF SEMI COLUMN DOES NOT POINT TO SEMI COLUMN");
                                             }
-                                            current_scope.characters[index] = 44;
+                                            code_analysis_object.current_scope.characters[index] = 44;
                                         }
                                     }
                                 }
                                 
                                 
                             } else {
-                                current_scope.characters.push(125)
+                                code_analysis_object.add_one_byte_char(characters::RIGHT_CURLY)
                             }
 
-                            scope_end(&mut current_scope, &mut all_values_count, &mut previous_line_state).await;
+                            scope_end(&mut code_analysis_object.current_scope, &mut all_values_count, &mut code_analysis_object.previous_buffer_state).await;
                             
                             
                         }
@@ -1681,32 +1116,16 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     //=>
                    
                     //if
-                    105 if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![102], &mut previous_line_state) => {
-                        for inside in [InsideOf::UpperIfStatement(Vec::new(), false), InsideOf::IfStatement] {
-                            current_scope = JsScope::new(Some(current_scope), inside);
-                        }
+                    105 if find_if_corresponds(&code_analysis_object.buffer_ref, &mut code_analysis_object.i_buffer, vec![102], &mut code_analysis_object.previous_buffer_state) => {
                         
-                        previous_line_state = PreviousLineState::WaitingParenthesis;
+                        
+                        
                     }
-                    //else
-                    101 if match current_scope.inside_of{InsideOf::UpperIfStatement(_,_ )=>true,_=>false} && find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![108, 115, 101], &mut previous_line_state) => {
-                        let new_inside_of = if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![32,105,102], &mut previous_line_state) {
-                            InsideOf::IfElseStatement 
-                        } else {
-                            InsideOf::ElseStatement
-                        };
-                        current_scope = JsScope::new(Some(current_scope),  new_inside_of);
-                    }
+                    
                     //function
-                    102 if find_if_corresponds(&buffers.buffer_ref, &mut i_buffer, vec![117,110,99,116,105,111,110,32], &mut previous_line_state) {
+                    102 if find_if_corresponds(&code_analysis_object.buffer_ref, &mut code_analysis_object.i_buffer, vec![117,110,99,116,105,111,110,32], &mut code_analysis_object.previous_buffer_state) {
                         
-                        find_function_name(&buffers.buffer_ref, &mut current_scope, &mut i_buffer, &mut all_values_count);
-                        while buffers.buffer_ref[i_buffer] != 40 {
-                            i_buffer+=1;
-                        }
-                        current_scope.characters.push(40);
                         
-                        new_values_init(&buffers.buffer_ref, &mut current_scope, &mut i_buffer, &mut all_values_count);
                     }
 
 
@@ -1714,73 +1133,70 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     
                     //;
                     59 => {
-                        while current_scope.end_scope_char == EndOfScopeChar::SemiColon {
-                            scope_end(&mut current_scope, &mut all_values_count, &mut previous_line_state);
+                        while code_analysis_object.current_scope.end_scope_char == code_analysis::EndOfScopeChar::SemiColon {
+                            scope_end(&mut code_analysis_object.current_scope, &mut all_values_count, &mut code_analysis_object.previous_buffer_state);
                         }
-                        if current_scope.end_scope_char == EndOfScopeChar::Curly {
-                            current_scope.semi_column_indexes.push(current_scope.characters.len());
+                        if code_analysis_object.current_scope.end_scope_char == code_analysis::EndOfScopeChar::Curly {
+                            code_analysis_object.current_scope.semi_column_indexes.push(code_analysis_object.current_scope.characters.len());
                             
                         } 
-                        current_scope.characters.push(59);
+                        code_analysis_object.add_one_byte_char(59);
                         
                     }
                     //)
-                    41 => {
-                        if current_scope.end_scope_char == EndOfScopeChar::Parenthesis {
-                            scope_end(&mut current_scope, &mut all_values_count, &mut previous_line_state);
-                            current_scope.characters.push(41);
+                    characters::RIGHT_PARENTHESIS => {
+                        if code_analysis_object.current_scope.end_scope_char == code_analysis::EndOfScopeChar::Parenthesis {
+                            scope_end(&mut code_analysis_object.current_scope, &mut all_values_count, &mut code_analysis_object.previous_buffer_state);
+                            code_analysis_object.add_one_byte_char(characters::RIGHT_PARENTHESIS);
 
                        
-                        } else if let PreviousLineState::WaitingEndScopeChar(x) = &previous_line_state {
+                        } else if let code_analysis::PreviousBufferState::WaitingEndScopeChar(x) = &code_analysis_object.previous_buffer_state {
                                 
                                 if *x == 0 {
                                     drop(x);
-                                    previous_line_state = PreviousLineState::ExpectingScopeChar;
+                                    code_analysis_object.previous_buffer_state = code_analysis::PreviousBufferState::ExpectingScopeChar;
                                 }
                                 *x-=1;
                             
                         } else {
-                            current_scope.characters.push(41);
+                            code_analysis_object.add_one_byte_char(characters::RIGHT_PARENTHESIS);
                         }
                         
                     }
                     //(
                     40 => {
-                        match &previous_line_state {
-                            PreviousLineState::WaitingParenthesis => previous_line_state = PreviousLineState::WaitingEndScopeChar(0),
-                            PreviousLineState::WaitingEndScopeChar(x) => {
+                        match &code_analysis_object.previous_buffer_state {
+                            code_analysis::PreviousBufferState::WaitingParenthesis => code_analysis_object.previous_buffer_state = code_analysis::PreviousBufferState::WaitingEndScopeChar(0),
+                            code_analysis::PreviousBufferState::WaitingEndScopeChar(x) => {
                                 *x+=1;
-                                current_scope.characters.push(40);
+                                code_analysis_object.add_one_byte_char(40);
                             },
-                            PreviousLineState::ExpectingScopeChar => {
-                                assign_end_scope_char(&mut current_scope, &mut previous_line_state, EndOfScopeChar::Parenthesis);
+                            code_analysis::PreviousBufferState::ExpectingScopeChar => {
+                                assign_end_scope_char(&mut code_analysis_object.current_scope, &mut code_analysis_object.previous_buffer_state, code_analysis::EndOfScopeChar::Parenthesis);
                             }
                             _=>{},
                         }
                     }
                 }
             }
-
-            
-            
             
             match byte {
                 32 | 10 => {},
                 _=> {
-                    match current_scope.inside_of {
-                        InsideOf::UpperIfStatement(_,_)=>{
-                            previous_line_state =  PreviousLineState::Code;
-                            scope_end(&mut current_scope, &mut all_values_count, &mut previous_line_state);
+                    match code_analysis_object.current_scope.inside_of {
+                        code_analysis::InsideOf::UpperIfStatement(_,_)=>{
+                            code_analysis_object.previous_buffer_state =  code_analysis::PreviousBufferState::Code;
+                            scope_end(&mut code_analysis_object.current_scope, &mut all_values_count, &mut code_analysis_object.previous_buffer_state);
                         } ,
                         _=> {
-                            if previous_line_state == PreviousLineState::ExpectingScopeChar {
-                                assign_end_scope_char(&mut current_scope, &mut previous_line_state, EndOfScopeChar::SemiColon);
+                            if code_analysis_object.previous_buffer_state == code_analysis::PreviousBufferState::ExpectingScopeChar {
+                                assign_end_scope_char(&mut code_analysis_object.current_scope, &mut code_analysis_object.previous_buffer_state, code_analysis::EndOfScopeChar::SemiColon);
                             }
                         }
                     }
                 }
             }
-            i_buffer+=1;
+            code_analysis_object.i_buffer+=1;
          
         }
         
@@ -1831,17 +1247,17 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                     }
                 }
                
-                125 => {
+                characters::RIGHT_CURLY => {
                     
-                    if let Some(scope) = current_scope.parent_scope {
-                        let all_children_used_values = current_scope.children_used_values.clone();
+                    if let Some(scope) = code_analysis_object.current_scope.parent_scope {
+                        let all_children_used_values = code_analysis_object.current_scope.children_used_values.clone();
                         let mut unused_values: HashMap<u8, Option<usize>> = HashMap::new();
 
                         for val in all_values_count.keys().cloned() {
-                            if let NewValueName::OneChar(one_char) = val {
+                            if let code_analysis::NewValueName::OneChar(one_char) = val {
                                 
                                 let mut unused=true;
-                                for value in &current_scope.values {
+                                for value in &code_analysis_object.current_scope.values {
                                     if value.value_new_name == val {
                                         unused=false;
                                         break;
@@ -1851,7 +1267,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                                 
                                 if unused {
                                     let mut present_after: bool = false;
-                                    for child_value in current_scope.children_used_values.clone() {
+                                    for child_value in code_analysis_object.current_scope.children_used_values.clone() {
                                         if child_value.value_new_name == val {
                                             unused_values.insert(one_char, Some(child_value.last_usage_index));
                                             present_after=true;
@@ -1868,8 +1284,8 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         }
                         let mut changed_values: HashMap<[u8;2], u8> = HashMap::new();
                         
-                        for value in &mut current_scope.values {
-                            if let NewValueName::TwoChar(two_char) =value.value_new_name {
+                        for value in &mut code_analysis_object.current_scope.values {
+                            if let code_analysis::NewValueName::TwoChar(two_char) =value.value_new_name {
                             let mut changed_value : Option<u8> = None;
                             
                             for (new_val, index) in &unused_values {
@@ -1882,7 +1298,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                                 }{
                                     changed_values.insert(two_char, *new_val);
                                     changed_value = Some(*new_val);
-                                    value.value_new_name = NewValueName::OneChar(*new_val);
+                                    value.value_new_name = code_analysis::NewValueName::OneChar(*new_val);
                                     break;
                                 }
                                     
@@ -1893,30 +1309,30 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                             }
                         }
 
-                        let mut j = current_scope.starting_index;
+                        let mut j = code_analysis_object.current_scope.starting_index;
                         let mut q_char: u8 = 0;
                         loop {
                             {
-                                let len = current_scope.characters.len();
+                                let len = code_analysis_object.current_scope.characters.len();
                                 if j >= len {
                                     break;
                                 }
                             }
                             // Now only mutable borrow
-                            find_value_to_replace(&mut q_char, &mut j, &changed_values, current_scope);
+                            find_value_to_replace(&mut q_char, &mut j, &changed_values, code_analysis_object.current_scope);
                             tokio::task::yield_now();
                         }
                         let parent = scope.borrow();
                         
-                        current_scope = parent.clone();
-                        current_scope.children_used_values = all_children_used_values;
+                        code_analysis_object.current_scope = parent.clone();
+                        code_analysis_object.current_scope.children_used_values = all_children_used_values;
                             
                      }
                     }
                 
-                123 => {
+                characters::LEFT_CURLY => {
                     if !inside_for {
-                        current_scope = JsScope::new(Some(current_scope), i, false);
+                        code_analysis_object.current_scope = code_analysis::JsScope::new(Some(code_analysis_object.current_scope), i, false);
                     } else {
                         inside_for = false;
                     }
@@ -1927,7 +1343,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
 
                     if buf_bytes[i+1] == 62 {
                         let mut j =i;
-                        current_scope = JsScope::new(Some(current_scope), i,  false);
+                        code_analysis_object.current_scope = code_analysis::JsScope::new(Some(code_analysis_object.current_scope), i,  false);
                         
                         while buf_bytes[j] != 40 && buf_bytes[j] != 61 {
                             j-=1;
@@ -1936,11 +1352,11 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         loop {
                             match buf_bytes[j] {
                                 28 => {
-                                    add_value(&mut current_scope, &mut all_values_count,  std::mem::take(&mut param_name), i);
+                                    add_value(&mut code_analysis_object.current_scope, &mut all_values_count,  std::mem::take(&mut param_name), i);
                                     
                                 } 
-                                61 | 41 => {
-                                    add_value(&mut current_scope, &mut all_values_count, param_name, i);
+                                61 | characters::RIGHT_PARENTHESIS => {
+                                    add_value(&mut code_analysis_object.current_scope, &mut all_values_count, param_name, i);
                                     break;
                                 } 
                                 _ => {
@@ -1959,7 +1375,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                             buf_bytes.drain(last_index+1..i);
                             i=last_index;
                         }
-                        if buf_bytes[i+1] == 123 {
+                        if buf_bytes[i+1] == characters::LEFT_CURLY {
                             i+=1;
                             last_index+=1;
                         }
@@ -1982,7 +1398,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                                 value_name: &mut value_name,
                                 all_values_count: &mut all_values_count,
                                 last_index: &mut last_index,
-                                current_scope: &mut current_scope,
+                                code_analysis_object.current_scope: &mut code_analysis_object.current_scope,
                         });
                     }
                     //function
@@ -1996,7 +1412,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                             end_index+=1;
                             match buf_bytes[end_index] {
                                 40 => {
-                                    add_value(&mut current_scope, &mut all_values_count, function_name, i);
+                                    add_value(&mut code_analysis_object.current_scope, &mut all_values_count, function_name, i);
                                     break;
                                     
                                 } _ => {
@@ -2023,7 +1439,7 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                                                 value_name: &mut value_name,
                                                 all_values_count: &mut all_values_count,
                                                 last_index: &mut last_index,
-                                                current_scope: &mut current_scope});
+                                                code_analysis_object.current_scope: &mut code_analysis_object.current_scope});
                         
                     }
                     //var
@@ -2045,12 +1461,12 @@ pub async fn compress_js(file_input: &str, file_output: &str) -> io::Result<()> 
                         }
                         if buf_bytes[i+1] == 40 
                         {
-                            current_scope = JsScope::new(Some(current_scope),  false, InsideOf::ForLoop);
+                            code_analysis_object.current_scope = code_analysis::JsScope::new(Some(code_analysis_object.current_scope),  false, code_analysis::InsideOf::ForLoop);
                             inside_for= true;
                             i+=1;
                         }
                     } else {
-                       find_value(&mut buf_bytes, &mut current_scope, &mut i, &mut last_index, &mut all_values_count);
+                       find_value(&mut buf_bytes, &mut code_analysis_object.current_scope, &mut i, &mut last_index, &mut all_values_count);
                     }
 
                  }

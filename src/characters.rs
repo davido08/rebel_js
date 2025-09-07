@@ -43,4 +43,10 @@
 
     ///'$'
     pub const DOLLAR_SIGN: u8 = 36;
+    ///'['
+    pub const LEFT_SQAURE_BRACKET: u8 = 91;
+    ///']'
+    pub const RIGHT_SQAURE_BRACKET: u8 = 93;
+
+    
 
